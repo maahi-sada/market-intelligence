@@ -9,9 +9,9 @@ from datetime import datetime
 from telegram import Bot
 
 # ── Config ─────────────────────────────────────
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID")
-GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY")
+TELEGRAM_TOKEN   = "7712276746:AAE6x8jevrOHNW2L4EhjNdDC6h3e_ii8vOI"
+TELEGRAM_CHAT_ID = "787902453"
+GEMINI_API_KEY   = "AIzaSyC-xp1LY-YykJtX6gp8kNw8jNXf2q2u2Ek"
 
 # ── Setup ───────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
