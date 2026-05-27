@@ -232,32 +232,27 @@ def run_scheduler(bot):
 
 def main():
     print("🚀 Starting Market Intelligence Bot...")
-    updater = Updater(token=TELEGRAM_TOKEN, use_context=True)
-    dp      = updater.dispatcher
 
-    dp.add_handler(CommandHandler("start",    cmd_start))
-    dp.add_handler(CommandHandler("help",     cmd_help))
-    dp.add_handler(CommandHandler("nifty",    cmd_nifty))
-    dp.add_handler(CommandHandler("holiday",  cmd_holiday))
-    dp.add_handler(CommandHandler("earnings", cmd_earnings))
-    dp.add_handler(CommandHandler("ban",      cmd_ban))
-    dp.add_handler(CommandHandler("oi",       cmd_oi))
+    # Works with both v13 and v20 of python-telegram-bot
+    from telegram.ext import Application, CommandHandler as CH
+    import asyncio
 
-    # Send startup message
-    updater.bot.send_message(
-        chat_id=TELEGRAM_CHAT_ID,
-        text="✅ *Market Intelligence Bot LIVE*\n\n📡 NSE announcements — every 3 min\n📈 OI spikes — every 30 min\n💬 Commands active — type /help",
-        parse_mode="Markdown"
-    )
+    async def run():
+        app = Application.builder().token(TELEGRAM_TOKEN).build()
+        app.add_handler(CH("start",    cmd_start_v2))
+        app.add_handler(CH("help",     cmd_help_v2))
+        app.add_handler(CH("nifty",    cmd_nifty_v2))
+        app.add_handler(CH("holiday",  cmd_holiday_v2))
+        app.add_handler(CH("earnings", cmd_earnings_v2))
+        app.add_handler(CH("ban",      cmd_ban_v2))
+        app.add_handler(CH("oi",       cmd_oi_v2))
+        await app.bot.send_message(chat_id=TELEGRAM_CHAT_ID,
+            text="✅ *Bot LIVE* — type /help", parse_mode="Markdown")
+        import threading
+        t = threading.Thread(target=run_scheduler, args=(app.bot,), daemon=True)
+        t.start()
+        await app.run_polling(drop_pending_updates=True)
 
-    # Start scheduler in background
-    import threading
-    t = threading.Thread(target=run_scheduler, args=(updater.bot,), daemon=True)
-    t.start()
-
-    print("✅ Bot started — polling for commands...")
-    updater.start_polling(drop_pending_updates=True)
-    updater.idle()
-
+    asyncio.run(run())
 if __name__ == "__main__":
     main()
