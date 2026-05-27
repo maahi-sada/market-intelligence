@@ -7,7 +7,7 @@ import json
 import os
 from datetime import datetime, date
 from telegram import Bot, Update
-from telegram.ext import Application, CommandHandler, MessageHandler, filters, ContextTypes
+from telegram.ext import ApplicationBuilder, CommandHandler, ContextTypes, Application
 
 # ── Config ─────────────────────────────────────
 TELEGRAM_TOKEN   = "7712276746:AAE6x8jevrOHNW2L4EhjNdDC6h3e_ii8vOI"
@@ -362,10 +362,8 @@ async def startup_message(app):
 def main():
     print("🚀 Starting Market Intelligence Bot...")
 
-    # Build Telegram application
-    app = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).build()
 
-    # Register commands
     app.add_handler(CommandHandler("start",    cmd_start))
     app.add_handler(CommandHandler("help",     cmd_help))
     app.add_handler(CommandHandler("nifty",    cmd_nifty))
@@ -374,17 +372,10 @@ def main():
     app.add_handler(CommandHandler("ban",      cmd_ban))
     app.add_handler(CommandHandler("oi",       cmd_oi))
 
-    # Run scheduler in background thread
     import threading
     bot = app.bot
     t = threading.Thread(target=run_scheduler, args=(bot,), daemon=True)
     t.start()
-
-    # Send startup message then start polling
-    async def post_init(app):
-        await startup_message(app)
-
-    app.post_init = post_init
 
     print("✅ Bot polling started — waiting for commands...")
     app.run_polling(drop_pending_updates=True)
