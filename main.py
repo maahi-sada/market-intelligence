@@ -16,6 +16,8 @@ GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY")
 # ── Setup ───────────────────────────────────────
 genai.configure(api_key=GEMINI_API_KEY)
 model     = genai.GenerativeModel("gemini-2.5-flash")
+print(f"TOKEN VALUE: '{TELEGRAM_TOKEN}'")
+bot = Bot(token=TELEGRAM_TOKEN)
 bot       = Bot(token=TELEGRAM_TOKEN)
 seen_ann  = set()
 seen_oi   = set()
