@@ -234,8 +234,22 @@ def check_announcements():
         company  = ann.get("sm_name", ann.get("symbol","Unknown"))
         subject  = ann.get("desc","")
         ann_time = ann.get("an_dt", datetime.now().strftime("%Y-%m-%d %H:%M"))
-        result = classify(company, subject)
-print(f"    Score: {result['score'] if result else 'None'} | {company[:30]}")
+        result   = classify(company, subject)
+        print(f"    Score: {result['score'] if result else 'None'} | {company[:30]}")
+        if not result or result["score"] < 3:
+            continue
+        ie  = {"HIGH":"🔴","MEDIUM":"🟡","LOW":"🟢"}.get(result["impact"],"⚪")
+        ce  = {"RESULTS":"📊","DIVIDEND":"💰","BUYBACK":"🔄","BOARD_MEETING":"📋","MERGER":"🤝","CONCALL":"📞","GUIDANCE":"🎯","OTHER":"📌"}.get(result["category"],"📌")
+        msg = (f"{ie} *{result['impact']} IMPACT*\n\n"
+               f"🏢 *{company}*\n"
+               f"{ce} {result['category']} | ⚡ {result['score']}/10\n"
+               f"📝 {result['summary']}\n"
+               f"🕐 {ann_time}")
+        send_msg(TELEGRAM_CHAT_ID, msg)
+        print(f"  ✅ Alert sent: {company} | {result['score']}/10")
+        sent += 1
+        time.sleep(1)
+    print(f"Done. Sent: {sent}")
 if not result or result["score"] < 3:
     continue
         ie  = {"HIGH":"🔴","MEDIUM":"🟡","LOW":"🟢"}.get(result["impact"],"⚪")
