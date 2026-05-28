@@ -464,8 +464,8 @@ def check_announcements():
         return
 
     sent = 0
-    for ann in anns[:5]:
-        ann_id = ann.get("an_dt", "") + ann.get("symbol", "") + ann.get("desc", "")[:20]
+    for ann in anns[:20]:
+    ann_id = ann.get("symbol", "") + ann.get("desc", "")[:30]
         if ann_id in seen_ann:
             continue
         seen_ann.add(ann_id)
@@ -476,6 +476,13 @@ def check_announcements():
         pdf_path = ann.get("attchmntFile", "")
 
         print(f"  RAW | {subject[:80]}")
+# Skip obvious junk without calling Groq
+        junk_keywords = ["newspaper", "trading window", "shareholding", "loss of share",
+                         "voting result", "agm", "egm", "compliance", "website", "investor meet",
+                         "con. call", "transcript", "presentation uploaded"]
+        if any(k in subject.lower() for k in junk_keywords):
+            print(f"  JUNK SKIP | {subject[:50]}")
+            continue
 
         # Fetch PDF if available
         pdf_text = ""
