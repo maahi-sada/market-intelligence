@@ -46,15 +46,68 @@ def get_nse_session():
 
 # ── Gemini Classification ─────────────────────
 def classify(company, subject):
-    prompt = f"""You are a senior Indian stock market analyst.
-Analyze this NSE announcement. Respond ONLY in raw JSON, no markdown.
-{{"category":"RESULTS or DIVIDEND or BUYBACK or BOARD_MEETING or MERGER or CONCALL or GUIDANCE or OTHER","impact":"HIGH or MEDIUM or LOW","score":<1-10>,"summary":"<2 sentences>"}}
+    prompt = f"""You are a stock market announcement filtering engine for Indian markets (NSE/BSE).
+
+FIRST: Decide if this announcement is worth alerting at all.
+
+IGNORE COMPLETELY (return null):
+- Newspaper publication notices
+- Voting result formalities  
+- AGM/EGM notices without major agenda
+- Transcript/presentation uploads
+- Routine conference call schedules
+- Closure of trading window
+- Compliance certificates
+- Shareholding pattern filings
+- Loss/duplicate share certificates
+- Analyst meet intimation
+- Routine tax/payment disclosures
+- Appointment of non-key personnel
+- Procedural board meeting notices
+- Exchange clarification with no material info
+- CSR/ESG/sustainability updates
+- Website/domain updates
+- Small routine work orders
+- Repetitive monthly updates with no surprise
+- Minor litigation
+- Normal operational updates
+- Press releases without financial impact
+
+ALERT ONLY IF announcement involves:
+- Quarterly/yearly results or earnings surprise
+- Major order wins or cancellations (>50cr)
+- Promoter stake change or pledge activity
+- Buyback, split, bonus, dividend, rights issue
+- M&A, merger, demerger, acquisition, asset sale
+- QIP, FPO, preferential allotment, debt restructuring
+- SEBI action, fraud, auditor resignation, insolvency
+- USFDA approval/warning, patent win/loss, regulatory clearance
+- CEO/CFO resignation or major management change
+- Credit rating upgrade/downgrade or default risk
+- Any event likely to move stock >3-5%%
+
+If announcement should be IGNORED, respond with exactly: null
+
+If announcement should be ALERTED, respond ONLY in raw JSON, no markdown:
+{{
+  "category": "RESULTS or ORDER or PROMOTER or CORPORATE_ACTION or MA or FUNDRAISE or REGULATORY or PHARMA or MANAGEMENT or CREDIT or OTHER",
+  "sentiment": "BULLISH or BEARISH or NEUTRAL",
+  "impact": "LOW or MEDIUM or HIGH or EXTREME",
+  "score": <1-10>,
+  "summary": "<one line: what happened>",
+  "market_reaction": "<one line: why market may react and how>",
+  "key_figures": "<extract any numbers, percentages, amounts mentioned>"
+}}
+
 Company: {company}
 Announcement: {subject}"""
+
     for attempt in range(3):
         try:
             r    = model.generate_content(prompt)
             text = r.text.strip().replace("```json", "").replace("```", "").strip()
+            if text.lower() == "null" or text == "":
+                return None
             return json.loads(text)
         except Exception as e:
             err = str(e)
@@ -66,7 +119,7 @@ Announcement: {subject}"""
                 print(f"  Gemini error: {e}")
                 return None
     return None
-
+    
 # ── Command Handlers ──────────────────────────
 def handle_nifty(chat_id):
     session = get_nse_session()
@@ -261,20 +314,22 @@ def check_announcements():
         print(f"  {score}/10 | {company[:35]}")
         if not result or score < 4:
             continue
-        ie = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(result["impact"], "⚪")
+       ie = {"EXTREME": "🚨", "HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(result["impact"], "⚪")
+        se = {"BULLISH": "📈", "BEARISH": "📉", "NEUTRAL": "➡️"}.get(result["sentiment"], "➡️")
         ce = {
-            "RESULTS": "📊", "DIVIDEND": "💰", "BUYBACK": "🔄",
-            "BOARD_MEETING": "📋", "MERGER": "🤝", "CONCALL": "📞",
-            "GUIDANCE": "🎯", "OTHER": "📌"
+            "RESULTS": "📊", "ORDER": "📦", "PROMOTER": "👤",
+            "CORPORATE_ACTION": "🔄", "MA": "🤝", "FUNDRAISE": "💰",
+            "REGULATORY": "⚖️", "PHARMA": "💊", "MANAGEMENT": "👔",
+            "CREDIT": "🏦", "OTHER": "📌"
         }.get(result["category"], "📌")
         msg = (
-            f"{ie} *{result['impact']} IMPACT ALERT*\n\n"
-            f"🏢 *Company:* {company}\n"
-            f"{ce} *Category:* {result['category']}\n"
-            f"⚡ *Score:* {result['score']}/10\n"
-            f"📝 *Summary:* {result['summary']}\n"
-            f"🕐 *Time:* {ann_time}\n"
-            f"🔗 *Exchange:* NSE"
+            f"{ie} *{result['impact']} IMPACT* | {se} *{result['sentiment']}*\n\n"
+            f"🏢 *{company}*\n"
+            f"{ce} *{result['category']}* | ⚡ *{result['score']}/10*\n\n"
+            f"📝 *What:* {result['summary']}\n"
+            f"💡 *Why it matters:* {result['market_reaction']}\n"
+            f"🔢 *Key figures:* {result['key_figures']}\n\n"
+            f"🕐 {ann_time} | 🔗 NSE"
         )
         send_msg(TELEGRAM_CHAT_ID, msg)
         print(f"  ✅ Alert sent: {company} | {result['score']}/10")
