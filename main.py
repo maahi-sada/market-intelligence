@@ -101,7 +101,7 @@ Announcement: {subject}"""
 
     try:
         r = client.chat.completions.create(
-            model="llama-3.1-8b-instant",
+            model="llama-3.3-70b-versatile",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=300,
             temperature=0.1
@@ -309,7 +309,8 @@ def check_announcements():
         company = ann.get("sm_name", ann.get("symbol", "Unknown"))
         subject = ann.get("desc", "")
         ann_time = ann.get("an_dt", datetime.now().strftime("%Y-%m-%d %H:%M"))
-        result = classify(company, subject)
+        print(f"  RAW | {subject[:80]}")
+result = classify(company, subject)
         if not result:
             print(f"  SKIP | {company[:40]}")
             continue
