@@ -465,7 +465,7 @@ def check_announcements():
 
     sent = 0
     for ann in anns[:20]:
-    ann_id = ann.get("symbol", "") + ann.get("desc", "")[:30]
+        ann_id = ann.get("symbol", "") + ann.get("desc", "")[:30]
         if ann_id in seen_ann:
             continue
         seen_ann.add(ann_id)
