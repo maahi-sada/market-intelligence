@@ -50,7 +50,8 @@ Announcement: {subject}"""
         r = model.generate_content(prompt)
         text = r.text.strip().replace("```json", "").replace("```", "").strip()
         return json.loads(text)
-    except:
+    except Exception as e:
+        print(f"  Gemini error: {e}")
         return None
 
 def handle_nifty(chat_id):
@@ -233,8 +234,8 @@ def check_announcements():
         subject = ann.get("desc", "")
         ann_time = ann.get("an_dt", datetime.now().strftime("%Y-%m-%d %H:%M"))
         result = classify(company, subject)
-        score = result["score"] if result else 0
-        print(f"  {score}/10 | {company[:35]}")
+        score = result["score"] if result else "FAIL"
+print(f"  {score}/10 | {company[:35]}")
         if not result or score < 3:
             continue
         ie = {"HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(result["impact"], "⚪")
