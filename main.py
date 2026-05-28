@@ -13,7 +13,7 @@ TELEGRAM_CHAT_ID = "787902453"
 GEMINI_API_KEY = "AIzaSyC-xp1LY-YykJtX6gp8kNw8jNXf2q2u2Ek"
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash-lite")
+model = genai.GenerativeModel("gemini-1.5-flash")
 seen_ann = set()
 
 
@@ -295,7 +295,7 @@ def check_announcements():
         return
 
     sent = 0
-    for ann in anns[:8]:
+    for ann in anns[:5]:
         ann_id = ann.get("an_dt", "") + ann.get("symbol", "") + ann.get("desc", "")[:20]
         if ann_id in seen_ann:
             continue
@@ -331,7 +331,7 @@ def check_announcements():
         send_msg(TELEGRAM_CHAT_ID, msg)
         print(f"  ✅ Alert sent: {company} | {score}/10")
         sent += 1
-        time.sleep(3)
+        time.sleep(8)
     print(f"Done. Sent: {sent}")
 
 
@@ -362,7 +362,7 @@ def check_oi_auto():
 
 
 def run_scheduler():
-    schedule.every(3).minutes.do(check_announcements)
+    schedule.every(6).minutes.do(check_announcements)
     schedule.every(30).minutes.do(check_oi_auto)
     while True:
         schedule.run_pending()
@@ -377,7 +377,7 @@ if __name__ == "__main__":
     print(f"✅ Webhook server on port {port}")
     send_msg(TELEGRAM_CHAT_ID,
         "✅ *Market Intelligence Bot LIVE*\n\n"
-        "📡 NSE announcements — every 3 min\n"
+        "📡 NSE announcements — every 6 min\n"
         "🧠 Smart filter — material events only\n"
         "📈 OI spikes — every 30 min\n"
         "💬 Type /help for all commands"
