@@ -50,7 +50,7 @@ Your job is EXTREMELY strict filtering. 95% of announcements must be ignored.
 
 IGNORE EVERYTHING EXCEPT THESE 3 TIERS:
 
-🔴 EXTREME (score 8-10) — stock moves 5-20%:
+EXTREME (score 8-10) — stock moves 5-20%:
 - Quarterly/annual results with surprise (beat or miss >10%)
 - Merger, acquisition, takeover bid, demerger
 - SEBI action, fraud, forensic audit, auditor resignation
@@ -58,7 +58,7 @@ IGNORE EVERYTHING EXCEPT THESE 3 TIERS:
 - USFDA approval or import alert or warning letter
 - Promoter selling stake >2% in open market
 
-🟠 HIGH (score 5-7) — stock moves 3-5%:
+HIGH (score 5-7) — stock moves 3-5%:
 - Major order win or cancellation above 100 crore
 - Buyback, bonus, stock split announcement
 - QIP or fundraise with pricing details
@@ -67,7 +67,7 @@ IGNORE EVERYTHING EXCEPT THESE 3 TIERS:
 - Block deal above 1% of total equity
 - Debt restructuring
 
-🟡 MEDIUM (score 3-4) — stock moves 1-3%:
+MEDIUM (score 3-4) — stock moves 1-3%:
 - Dividend announcement with amount
 - Promoter pledge increase above 5%
 - Pharma patent win or loss
@@ -92,9 +92,9 @@ STRICTLY IGNORE — return null for ALL of these no exceptions:
 - Website update
 - Any announcement not in the 3 tiers above
 
-If not in EXTREME, HIGH, or MEDIUM tiers → return exactly: null
+If not in EXTREME, HIGH, or MEDIUM tiers — return exactly: null
 
-If in one of the 3 tiers → return ONLY raw JSON no markdown no explanation:
+If in one of the 3 tiers — return ONLY raw JSON no markdown no explanation:
 {{"tier":"EXTREME or HIGH or MEDIUM","category":"RESULTS or ORDER or PROMOTER or CORPORATE_ACTION or MA or FUNDRAISE or REGULATORY or PHARMA or MANAGEMENT or CREDIT or OTHER","sentiment":"BULLISH or BEARISH or NEUTRAL","impact":"EXTREME or HIGH or MEDIUM","score":<3-10>,"summary":"<one line what happened>","market_reaction":"<one line why market will react>","key_figures":"<extract all numbers percentages amounts>"}}
 
 Company: {company}
@@ -109,7 +109,6 @@ Announcement: {subject}"""
     except Exception as e:
         print(f"Gemini error: {e}")
         return None
-    return None
 
 
 def handle_nifty(chat_id):
@@ -241,7 +240,7 @@ def handle_help(chat_id):
         "🚫 /ban — F&O ban list\n"
         "📈 /oi — OI spike report on demand\n"
         "❓ /help — This menu\n\n"
-        "_Auto alerts every 3 min — material events only_\n"
+        "_Auto alerts every 6 min — material events only_\n"
         "_OI intelligence report every 30 min_"
     ))
 
@@ -315,25 +314,24 @@ def check_announcements():
         if score < 3:
             continue
         tier = result.get("tier", "MEDIUM")
-te = {"EXTREME": "🔴 EXTREME", "HIGH": "🟠 HIGH", "MEDIUM": "🟡 MEDIUM"}.get(tier, "🟡 MEDIUM")
-ie = {"EXTREME": "🚨", "HIGH": "🔴", "MEDIUM": "🟡"}.get(tier, "🟡")
-se = {"BULLISH": "📈", "BEARISH": "📉", "NEUTRAL": "➡️"}.get(result.get("sentiment", ""), "➡️")
-ce = {
-    "RESULTS": "📊", "ORDER": "📦", "PROMOTER": "👤",
-    "CORPORATE_ACTION": "🔄", "MA": "🤝", "FUNDRAISE": "💰",
-    "REGULATORY": "⚖️", "PHARMA": "💊", "MANAGEMENT": "👔",
-    "CREDIT": "🏦", "OTHER": "📌"
-}.get(result.get("category", ""), "📌")
-
-msg = (
-    f"{ie} *{te} ALERT* | {se} *{result.get('sentiment','?')}*\n\n"
-    f"🏢 *{company}*\n"
-    f"{ce} *{result.get('category','?')}* | ⚡ *{score}/10*\n\n"
-    f"📝 *What:* {result.get('summary','')}\n"
-    f"💡 *Why it matters:* {result.get('market_reaction','')}\n"
-    f"🔢 *Key figures:* {result.get('key_figures','N/A')}\n\n"
-    f"🕐 {ann_time} | 🔗 NSE"
-)
+        te = {"EXTREME": "🔴 EXTREME", "HIGH": "🟠 HIGH", "MEDIUM": "🟡 MEDIUM"}.get(tier, "🟡 MEDIUM")
+        ie = {"EXTREME": "🚨", "HIGH": "🔴", "MEDIUM": "🟡"}.get(tier, "🟡")
+        se = {"BULLISH": "📈", "BEARISH": "📉", "NEUTRAL": "➡️"}.get(result.get("sentiment", ""), "➡️")
+        ce = {
+            "RESULTS": "📊", "ORDER": "📦", "PROMOTER": "👤",
+            "CORPORATE_ACTION": "🔄", "MA": "🤝", "FUNDRAISE": "💰",
+            "REGULATORY": "⚖️", "PHARMA": "💊", "MANAGEMENT": "👔",
+            "CREDIT": "🏦", "OTHER": "📌"
+        }.get(result.get("category", ""), "📌")
+        msg = (
+            f"{ie} *{te} ALERT* | {se} *{result.get('sentiment','?')}*\n\n"
+            f"🏢 *{company}*\n"
+            f"{ce} *{result.get('category','?')}* | ⚡ *{score}/10*\n\n"
+            f"📝 *What:* {result.get('summary','')}\n"
+            f"💡 *Why it matters:* {result.get('market_reaction','')}\n"
+            f"🔢 *Key figures:* {result.get('key_figures','N/A')}\n\n"
+            f"🕐 {ann_time} | 🔗 NSE"
+        )
         send_msg(TELEGRAM_CHAT_ID, msg)
         print(f"  ✅ Alert sent: {company} | {score}/10")
         sent += 1
