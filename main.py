@@ -8,9 +8,9 @@ import threading
 from datetime import datetime, date
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-TELEGRAM_TOKEN = "YOUR_BOT_TOKEN"
-TELEGRAM_CHAT_ID = "YOUR_CHAT_ID"
-GEMINI_API_KEY = "YOUR_GEMINI_KEY"
+TELEGRAM_TOKEN = "7712276746:AAE6x8jevrOHNW2L4EhjNdDC6h3e_ii8vOI"
+TELEGRAM_CHAT_ID = "787902453"
+GEMINI_API_KEY = "AIzaSyC-xp1LY-YykJtX6gp8kNw8jNXf2q2u2Ek"
 
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.0-flash-lite")
