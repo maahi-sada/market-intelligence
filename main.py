@@ -208,7 +208,7 @@ def format_alert(company, symbol, result, ann_time, session):
     tier = result.get("tier", "MEDIUM")
     category = result.get("category", "OTHER")
     sentiment = result.get("sentiment", "NEUTRAL")
-    score = result.get("score", 0)
+    score = result.get("score") or 0
 
     te = {"EXTREME": "🔴 EXTREME", "HIGH": "🟠 HIGH", "MEDIUM": "🟡 MEDIUM"}.get(tier, "🟡 MEDIUM")
     ie = {"EXTREME": "🚨", "HIGH": "🔴", "MEDIUM": "🟡"}.get(tier, "🟡")
