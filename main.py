@@ -44,68 +44,71 @@ def get_nse_session():
 
 
 def classify(company, subject):
-    prompt = f"""You are a stock market announcement filtering engine for Indian markets.
+    prompt = f"""You are an institutional stock market alert system used by hedge funds and Bloomberg terminals.
 
-IGNORE COMPLETELY and return null for:
-- Newspaper publication notices
-- Voting result formalities
-- AGM/EGM notices without major agenda
-- Transcript or presentation uploads
-- Routine conference call schedules
-- Closure of trading window
-- Compliance certificates
-- Shareholding pattern filings
-- Loss or duplicate share certificates
-- Analyst meet intimation
-- Routine tax or payment disclosures
-- Appointment of non-key personnel
-- Procedural board meeting notices
-- Exchange clarification with no material info
-- CSR, ESG, sustainability updates
-- Website or domain updates
-- Small routine work orders
-- Repetitive monthly updates with no surprise
-- Minor litigation
-- Normal operational updates
-- Press releases without financial impact
+Your job is EXTREMELY strict filtering. 95% of announcements must be ignored.
 
-ALERT ONLY IF announcement involves:
-- Quarterly or yearly results or earnings surprise
-- Major order wins or cancellations above 50 crore
-- Promoter stake change or pledge activity
-- Buyback, split, bonus, dividend, rights issue
-- Merger, demerger, acquisition, asset sale
-- QIP, FPO, preferential allotment, debt restructuring
-- SEBI action, fraud, auditor resignation, insolvency
-- USFDA approval or warning, patent win or loss
-- CEO or CFO resignation or major management change
-- Credit rating upgrade or downgrade or default risk
-- Any event likely to move stock more than 3 to 5 percent
+IGNORE EVERYTHING EXCEPT THESE 3 TIERS:
 
-If announcement should be IGNORED return exactly: null
+🔴 EXTREME (score 8-10) — stock moves 5-20%:
+- Quarterly/annual results with surprise (beat or miss >10%)
+- Merger, acquisition, takeover bid, demerger
+- SEBI action, fraud, forensic audit, auditor resignation
+- Insolvency, NCLT filing, debt default
+- USFDA approval or import alert or warning letter
+- Promoter selling stake >2% in open market
 
-If announcement should be ALERTED return ONLY raw JSON no markdown:
-{{"category":"RESULTS or ORDER or PROMOTER or CORPORATE_ACTION or MA or FUNDRAISE or REGULATORY or PHARMA or MANAGEMENT or CREDIT or OTHER","sentiment":"BULLISH or BEARISH or NEUTRAL","impact":"LOW or MEDIUM or HIGH or EXTREME","score":<1-10>,"summary":"<one line what happened>","market_reaction":"<one line why market may react>","key_figures":"<extract numbers percentages amounts>"}}
+🟠 HIGH (score 5-7) — stock moves 3-5%:
+- Major order win or cancellation above 100 crore
+- Buyback, bonus, stock split announcement
+- QIP or fundraise with pricing details
+- CEO or CFO resignation or sudden management change
+- Credit rating downgrade or upgrade
+- Block deal above 1% of total equity
+- Debt restructuring
+
+🟡 MEDIUM (score 3-4) — stock moves 1-3%:
+- Dividend announcement with amount
+- Promoter pledge increase above 5%
+- Pharma patent win or loss
+- Plant shutdown, fire, major operational disruption
+- Large capex or capacity expansion above 200 crore
+- JV or partnership with a marquee company
+
+STRICTLY IGNORE — return null for ALL of these no exceptions:
+- AGM / EGM notices
+- Board meeting intimation
+- Shareholding pattern filing
+- Newspaper publication notice
+- Compliance certificate
+- Trading window closure
+- Analyst meet or conference call schedule
+- Transcript or presentation upload
+- CSR or ESG update
+- Loss of share certificate
+- Voting results
+- Routine tax or payment disclosure
+- Exchange clarification
+- Website update
+- Any announcement not in the 3 tiers above
+
+If not in EXTREME, HIGH, or MEDIUM tiers → return exactly: null
+
+If in one of the 3 tiers → return ONLY raw JSON no markdown no explanation:
+{{"tier":"EXTREME or HIGH or MEDIUM","category":"RESULTS or ORDER or PROMOTER or CORPORATE_ACTION or MA or FUNDRAISE or REGULATORY or PHARMA or MANAGEMENT or CREDIT or OTHER","sentiment":"BULLISH or BEARISH or NEUTRAL","impact":"EXTREME or HIGH or MEDIUM","score":<3-10>,"summary":"<one line what happened>","market_reaction":"<one line why market will react>","key_figures":"<extract all numbers percentages amounts>"}}
 
 Company: {company}
 Announcement: {subject}"""
 
-    for attempt in range(3):
-        try:
-            r = model.generate_content(prompt)
-            text = r.text.strip().replace("```json", "").replace("```", "").strip()
-            if text.lower() == "null" or text == "":
-                return None
-            return json.loads(text)
-        except Exception as e:
-            err = str(e)
-            if "429" in err:
-                wait = 15 + (attempt * 10)
-                print(f"  Rate limit — waiting {wait}s...")
-                time.sleep(wait)
-            else:
-                print(f"  Gemini error: {e}")
-                return None
+    try:
+        r = model.generate_content(prompt)
+        text = r.text.strip().replace("```json", "").replace("```", "").strip()
+        if text.lower() == "null" or text == "":
+            return None
+        return json.loads(text)
+    except Exception as e:
+        print(f"Gemini error: {e}")
+        return None
     return None
 
 
@@ -309,25 +312,28 @@ def check_announcements():
             continue
         score = result.get("score", 0)
         print(f"  {score}/10 | {result.get('sentiment','?')} | {company[:35]}")
-        if score < 4:
+        if score < 3:
             continue
-        ie = {"EXTREME": "🚨", "HIGH": "🔴", "MEDIUM": "🟡", "LOW": "🟢"}.get(result.get("impact", ""), "⚪")
-        se = {"BULLISH": "📈", "BEARISH": "📉", "NEUTRAL": "➡️"}.get(result.get("sentiment", ""), "➡️")
-        ce = {
-            "RESULTS": "📊", "ORDER": "📦", "PROMOTER": "👤",
-            "CORPORATE_ACTION": "🔄", "MA": "🤝", "FUNDRAISE": "💰",
-            "REGULATORY": "⚖️", "PHARMA": "💊", "MANAGEMENT": "👔",
-            "CREDIT": "🏦", "OTHER": "📌"
-        }.get(result.get("category", ""), "📌")
-        msg = (
-            f"{ie} *{result.get('impact','?')} IMPACT* | {se} *{result.get('sentiment','?')}*\n\n"
-            f"🏢 *{company}*\n"
-            f"{ce} *{result.get('category','?')}* | ⚡ *{score}/10*\n\n"
-            f"📝 *What:* {result.get('summary','')}\n"
-            f"💡 *Why it matters:* {result.get('market_reaction','')}\n"
-            f"🔢 *Key figures:* {result.get('key_figures','N/A')}\n\n"
-            f"🕐 {ann_time} | 🔗 NSE"
-        )
+        tier = result.get("tier", "MEDIUM")
+te = {"EXTREME": "🔴 EXTREME", "HIGH": "🟠 HIGH", "MEDIUM": "🟡 MEDIUM"}.get(tier, "🟡 MEDIUM")
+ie = {"EXTREME": "🚨", "HIGH": "🔴", "MEDIUM": "🟡"}.get(tier, "🟡")
+se = {"BULLISH": "📈", "BEARISH": "📉", "NEUTRAL": "➡️"}.get(result.get("sentiment", ""), "➡️")
+ce = {
+    "RESULTS": "📊", "ORDER": "📦", "PROMOTER": "👤",
+    "CORPORATE_ACTION": "🔄", "MA": "🤝", "FUNDRAISE": "💰",
+    "REGULATORY": "⚖️", "PHARMA": "💊", "MANAGEMENT": "👔",
+    "CREDIT": "🏦", "OTHER": "📌"
+}.get(result.get("category", ""), "📌")
+
+msg = (
+    f"{ie} *{te} ALERT* | {se} *{result.get('sentiment','?')}*\n\n"
+    f"🏢 *{company}*\n"
+    f"{ce} *{result.get('category','?')}* | ⚡ *{score}/10*\n\n"
+    f"📝 *What:* {result.get('summary','')}\n"
+    f"💡 *Why it matters:* {result.get('market_reaction','')}\n"
+    f"🔢 *Key figures:* {result.get('key_figures','N/A')}\n\n"
+    f"🕐 {ann_time} | 🔗 NSE"
+)
         send_msg(TELEGRAM_CHAT_ID, msg)
         print(f"  ✅ Alert sent: {company} | {score}/10")
         sent += 1
