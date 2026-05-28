@@ -234,9 +234,10 @@ def check_announcements():
         company  = ann.get("sm_name", ann.get("symbol","Unknown"))
         subject  = ann.get("desc","")
         ann_time = ann.get("an_dt", datetime.now().strftime("%Y-%m-%d %H:%M"))
-        result   = classify(company, subject)
-        if not result or result["score"] < 4:
-            continue
+        result = classify(company, subject)
+print(f"    Score: {result['score'] if result else 'None'} | {company[:30]}")
+if not result or result["score"] < 3:
+    continue
         ie  = {"HIGH":"🔴","MEDIUM":"🟡","LOW":"🟢"}.get(result["impact"],"⚪")
         ce  = {"RESULTS":"📊","DIVIDEND":"💰","BUYBACK":"🔄","BOARD_MEETING":"📋","MERGER":"🤝","CONCALL":"📞","GUIDANCE":"🎯","OTHER":"📌"}.get(result["category"],"📌")
         msg = (f"{ie} *{result['impact']} IMPACT*\n\n"
