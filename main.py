@@ -310,7 +310,7 @@ def check_announcements():
         subject = ann.get("desc", "")
         ann_time = ann.get("an_dt", datetime.now().strftime("%Y-%m-%d %H:%M"))
         print(f"  RAW | {subject[:80]}")
-result = classify(company, subject)
+        result = classify(company, subject)
         if not result:
             print(f"  SKIP | {company[:40]}")
             continue
