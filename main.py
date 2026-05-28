@@ -121,7 +121,7 @@ def order_context(order_value_cr, marketcap_cr):
 
 def classify(company, subject, pdf_text=""):
     """Classify announcement and extract smart details"""
-    combined = f"Subject: {subject}\n\nPDF Content: {pdf_text[:1500]}" if pdf_text else f"Subject: {subject}"
+    combined = f"Subject: {subject}\n\nPDF Content: {pdf_text[:800]}" if pdf_text else f"Subject: {subject}"
 
     prompt = f"""You are an institutional stock market alert system used by hedge funds and Bloomberg terminals.
 
@@ -189,7 +189,7 @@ Company: {company}
 
     try:
         r = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="llama-3.1-8b-instant",
             messages=[{"role": "user", "content": prompt}],
             max_tokens=500,
             temperature=0.1
