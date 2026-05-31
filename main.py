@@ -110,6 +110,27 @@ def get_marketcap(session, symbol):
     except:
         pass
     return 0
+    def get_stock_info(session, symbol):
+    try:
+        resp = session.get(
+            f"https://www.nseindia.com/api/quote-equity?symbol={symbol}",
+            timeout=10
+        )
+        if resp.status_code != 200:
+            return {}
+        d     = resp.json()
+        meta  = d.get("metadata", {})
+        sec   = d.get("securityInfo", {})
+        price = meta.get("lastPrice", 0)
+        shares = sec.get("issuedSize", 0)
+        mc    = (price * shares / 1e7) if price and shares else 0
+        return {
+            "cmp":   price,
+            "mcap":  mc,
+            "fno":   "Yes" if sec.get("isFNOSec") else "No"
+        }
+    except:
+        return {}
 
 def order_context(order_cr, mc_cr):
     if mc_cr <= 0:
@@ -194,7 +215,7 @@ IGNORE — return null:
 Return exactly: null — if not worth alerting.
 
 If worth alerting, return ONLY this raw JSON with no markdown:
-{{"tier":"EXTREME or HIGH or MEDIUM","category":"RESULTS or ORDER or PROMOTER or CORPORATE_ACTION or MA or FUNDRAISE or REGULATORY or PHARMA or MANAGEMENT or CREDIT or OTHER","sentiment":"BULLISH or BEARISH or NEUTRAL","score":<3-10>,"summary":"<one line with numbers if available>","market_reaction":"<one line why stock will move>","dividend_amount":"<Rs X per share or null>","dividend_exdate":"<DD-Mon-YYYY or null>","person_name":"<full name or null>","person_designation":"<title or null>","person_action":"<resigned or appointed or null>","order_value_cr":<number or 0>,"key_figures":"<all numbers revenues profits percentages>"}}
+{{"tier":"EXTREME or HIGH or MEDIUM","category":"RESULTS or ORDER or PROMOTER or CORPORATE_ACTION or MA or FUNDRAISE or REGULATORY or PHARMA or MANAGEMENT or CREDIT or OTHER","sentiment":"BULLISH or BEARISH or NEUTRAL","score":<3-10>,"summary":"<one line with numbers if available>","market_reaction":"<one line why stock will move and expected % move>","dividend_amount":"<Rs X per share or null>","dividend_exdate":"<DD-Mon-YYYY or null>","buyback_price":<price in Rs or 0>,"buyback_size_cr":<total buyback size in crores or 0>,"buyback_premium_pct":<premium over CMP in % or 0>,"person_name":"<full name or null>","person_designation":"<title or null>","person_action":"<resigned or appointed or null>","order_value_cr":<number or 0>,"key_figures":"<all numbers revenues profits percentages>"}}
 
 Company: {company}
 {body}"""
@@ -238,21 +259,35 @@ def format_alert(company, symbol, result, ann_time, session):
         "MANAGEMENT":"👔","CREDIT":"🏦","OTHER":"📌"
     }.get(category,"📌")
 
+ info = get_stock_info(session, symbol) if symbol else {}
+    cmp  = info.get("cmp", 0)
+    mc   = info.get("mcap", 0)
+    fno  = info.get("fno", "?")
+
     msg = (
         f"{ie} *{te} ALERT* | {se} *{sentiment}*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🏢 *{company}*\n"
-        f"{ce} *{category}* | ⚡ *{score}/10*\n\n"
-        f"📝 {result.get('summary','')}\n\n"
-    )
+        f"{ce} *{category}* | ⚡ *{score}/10*\n"
+        f"💹 CMP: ₹{cmp:,.2f} | MCap: ₹{mc:,.0f}Cr | F&O: {fno}\n\n"
 
     if category == "CORPORATE_ACTION":
-        da = result.get("dividend_amount")
-        de = result.get("dividend_exdate")
+        da  = result.get("dividend_amount")
+        de  = result.get("dividend_exdate")
+        bp  = result.get("buyback_price") or 0
+        bs  = result.get("buyback_size_cr") or 0
+        bpr = result.get("buyback_premium_pct") or 0
+
         if da and da != "null":
             msg += f"💵 *Dividend:* {da} per share\n"
         if de and de != "null":
             msg += f"📅 *Ex-date:* {de}\n"
+        if bp > 0:
+            msg += f"💰 *Buyback Price:* ₹{bp:,.2f}\n"
+        if bpr > 0:
+            msg += f"📈 *Premium over CMP:* {bpr:.1f}%\n"
+        if bs > 0:
+            msg += f"📦 *Buyback Size:* ₹{bs:,.0f} Cr\n"
         msg += "\n"
 
     elif category == "MANAGEMENT":
