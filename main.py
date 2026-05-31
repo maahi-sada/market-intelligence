@@ -1,247 +1,574 @@
-import os
-import time
-import logging
 import requests
-import xml.etree.ElementTree as ET
+import google.generativeai as genai
+import schedule
+import time
+import json
+import os
+import threading
+import pytz
+from datetime import datetime, date
+from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ==========================================
-# 1. LOGGING & SYSTEM CONFIGURATION
-# ==========================================
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s [%(levelname)s] %(message)s',
-    handlers=[logging.StreamHandler()]
-)
-logger = logging.getLogger("MARKET_ENGINE")
+# ── CONFIG — fill these in Railway environment variables ──
+TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
+GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
+# ─────────────────────────────────────────────────────────
 
-# Load Environment Variables from Railway
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+IST       = pytz.timezone("Asia/Kolkata")
+seen_ann  = set()
+SEEN_FILE = "/app/seen_ann.json"
 
-if not GEMINI_API_KEY:
-    logger.critical("❌ BOOT ERROR: GEMINI_API_KEY is missing in Railway variables!")
-    raise ValueError("Set GEMINI_API_KEY in your Railway dashboard.")
+genai.configure(api_key=GEMINI_API_KEY)
+model = genai.GenerativeModel("gemini-2.0-flash")
 
-# Local cache file to maintain persistent alert memory on Railway filesystem
-SEEN_ALERTS_FILE = "processed_alerts_cache.txt"
 
-# ==========================================
-# 2. TELEGRAM DISPATCH ENGINE
-# ==========================================
-def send_to_telegram(text_message: str):
-    """Dispatches clean, formatted institutional alert sheets to your Telegram."""
-    if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        return
+# ── TIME ──────────────────────────────────────────────────
+def now_ist(fmt="%d %b %Y %H:%M IST"):
+    return datetime.now(IST).strftime(fmt)
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
-    payload = {
-        "chat_id": TELEGRAM_CHAT_ID,
-        "text": text_message,
-        "parse_mode": "Markdown"
-    }
-    
+
+# ── PERSISTENT DEDUP ──────────────────────────────────────
+def load_seen():
     try:
-        response = requests.post(url, json=payload, timeout=15)
-        if response.status_code != 200:
-            logger.error(f"Telegram API Refusal: {response.text}")
-    except Exception as e:
-        logger.error(f"Failed to connect to Telegram servers: {e}")
+        if os.path.exists(SEEN_FILE):
+            with open(SEEN_FILE) as f:
+                seen_ann.update(json.load(f))
+            print(f"Loaded {len(seen_ann)} seen IDs")
+    except:
+        pass
 
-# ==========================================
-# 3. FILTER #1 — HARD ADMINISTRATIVE NOISE REMOVER
-# ==========================================
-JUNK_KEYWORDS = [
-    "trading window", "board meeting schedule", "agm notice", "egm notice",
-    "newspaper publication", "compliance disclosure", "investor meeting schedule",
-    "generic presentation", "address change", "share certificate", "procedural update",
-    "loss of certificate", "analyst call audio", "transcript of analyst", "analyst call recording",
-    "loss of share", "closure of trading window", "newspaper advertisement", "disclosure under regulation"
+def save_seen():
+    try:
+        with open(SEEN_FILE, "w") as f:
+            json.dump(list(seen_ann)[-2000:], f)
+    except:
+        pass
+
+
+# ── TELEGRAM ──────────────────────────────────────────────
+def send_msg(chat_id, text):
+    try:
+        r = requests.post(
+            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
+            timeout=10
+        )
+        if r.status_code != 200:
+            print(f"Telegram error {r.status_code}: {r.text[:80]}")
+    except Exception as e:
+        print(f"Telegram error: {e}")
+
+
+# ── NSE SESSION ───────────────────────────────────────────
+def get_nse_session():
+    s = requests.Session()
+    s.headers.update({
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+        "Accept": "application/json",
+        "Referer": "https://www.nseindia.com/",
+    })
+    try:
+        s.get("https://www.nseindia.com", timeout=10)
+        time.sleep(1)
+    except:
+        pass
+    return s
+
+
+# ── PDF FETCH (only for results/merger/fraud) ─────────────
+def fetch_pdf_text(session, pdf_path):
+    try:
+        import io, pypdf
+        url  = f"https://www.nseindia.com{pdf_path}" if pdf_path.startswith("/") else pdf_path
+        resp = session.get(url, timeout=20)
+        if resp.status_code != 200:
+            return ""
+        reader = pypdf.PdfReader(io.BytesIO(resp.content))
+        text = ""
+        for page in reader.pages[:3]:
+            text += page.extract_text() or ""
+        return text[:2000]
+    except Exception as e:
+        print(f"PDF error: {e}")
+        return ""
+
+
+# ── ORDER CONTEXT ─────────────────────────────────────────
+def get_marketcap(session, symbol):
+    try:
+        resp = session.get(
+            f"https://www.nseindia.com/api/quote-equity?symbol={symbol}",
+            timeout=10
+        )
+        if resp.status_code == 200:
+            d      = resp.json()
+            price  = d.get("metadata", {}).get("lastPrice", 0)
+            shares = d.get("securityInfo", {}).get("issuedSize", 0)
+            if price and shares:
+                return (price * shares) / 1e7
+    except:
+        pass
+    return 0
+
+def order_context(order_cr, mc_cr):
+    if mc_cr <= 0:
+        return ""
+    r = (order_cr / mc_cr) * 100
+    if r >= 100: return f"🚀 MASSIVE — {r:.0f}% of Mkt Cap!"
+    if r >= 50:  return f"🔴 HUGE — {r:.0f}% of Mkt Cap"
+    if r >= 20:  return f"🟠 LARGE — {r:.0f}% of Mkt Cap"
+    if r >= 10:  return f"🟡 SIGNIFICANT — {r:.0f}% of Mkt Cap"
+    return f"⚪ ROUTINE — {r:.0f}% of Mkt Cap"
+
+
+# ── JUNK PRE-FILTER (no AI cost) ──────────────────────────
+JUNK = [
+    "trading window", "shareholding pattern", "newspaper",
+    "loss of share", "duplicate share", "voting result",
+    "agm notice", "egm notice", "compliance certificate",
+    "transcript", "presentation uploaded", "closure of trading",
+    "change in address", "book closure", "investor meet",
+    "con. call updates", "website update", "csr activity",
+    "change in registrar", "change in auditor address",
+    "intimation of board meeting", "loss of certificate"
 ]
 
-def is_announcement_valuable(headline: str, text: str) -> bool:
-    """Instantly drops routine compliance updates to protect your API quota."""
-    combined_content = f"{headline} {text}".lower()
-    for keyword in JUNK_KEYWORDS:
-        if keyword in combined_content:
-            return False
-    return True
+def is_junk(subject):
+    s = subject.lower()
+    return any(k in s for k in JUNK)
 
-# ==========================================
-# 4. STATION 2 — LIGHTWEIGHT PERSISTENT MEMORY
-# ==========================================
-def load_processed_alerts() -> set:
-    if os.path.exists(SEEN_ALERTS_FILE):
-        with open(SEEN_ALERTS_FILE, "r") as f:
-            return set(line.strip() for line in f if line.strip())
-    return set()
 
-def save_processed_alert(alert_id: str):
-    with open(SEEN_ALERTS_FILE, "a") as f:
-        f.write(f"{alert_id}\n")
+# ── GEMINI CLASSIFICATION ─────────────────────────────────
+def classify(company, subject, pdf_text=""):
+    body = f"Subject: {subject}\n\nPDF Content:\n{pdf_text[:1500]}" if pdf_text else f"Subject: {subject}"
 
-# ==========================================
-# 5. STRATEGIC RESEARCH SYSTEM INSTRUCTION
-# ==========================================
-SYSTEM_INSTRUCTION = """
-Act as a Bloomberg Terminal and an event-driven hedge fund analyst.
-Analyze corporate announcements and extract ONLY high-conviction, market-moving alerts.
+    prompt = f"""You are a senior equity analyst at a top hedge fund. Classify this NSE announcement strictly.
 
-Select the dynamic presentation layout based on the market signal direction:
-- Highly Bullish Events: Use 🚀, 🔥, 📈.
-- Heavily Bearish Events: Use 🩸, 📉, ⚠️.
-- Neutral/Structural Updates: Use 🧱, 📊.
+SENTIMENT RULES:
+- BULLISH: good results, order win, dividend, bonus, buyback, asset acquisition, rating upgrade, FDA approval
+- BEARISH: bad results, order loss, CEO/CFO resignation, rating downgrade, fraud, SEBI action, insolvency, shutdown
+- NEUTRAL: routine appointment, unclear JV, capex without timeline
 
-Format your response EXACTLY like this layout structure using standard markdown bolding:
+TIER RULES:
+EXTREME (score 8-10):
+- Quarterly/annual results with profit or revenue mentioned
+- Merger, acquisition, takeover, demerger
+- SEBI action, fraud, forensic audit, auditor resignation
+- Insolvency, NCLT, debt default
+- USFDA approval or warning letter
+- Promoter stake change >2%
 
-### [INSERT RELEVANT TOP EMOJIS HERE] **MARKET FLASH | HIGH-CONVICTION SIGNAL** [INSERT RELEVANT TOP EMOJIS HERE]
+HIGH (score 5-7):
+- Order win or loss above 100 crore
+- Buyback, bonus issue, stock split
+- QIP, preferential allotment with price
+- CEO or CFO resignation or new appointment
+- Credit rating change
+- Block deal above 1% equity
+- Debt restructuring
 
-**📍 STOCK:** [Company Name] ([Ticker] / [Sector Name])
-**💰 METRICS:** CMP: [Insert Price/Data] | M-Cap: [Insert Size] | **F&O:** [Yes/No]
+MEDIUM (score 3-4):
+- Dividend with exact amount
+- Promoter pledge increase above 5%
+- Patent win or loss
+- Plant fire or shutdown
+- Capex above 200 crore
+- Strategic JV with clear financials
 
-**⚡ EVENT:** [Headline Summary of the Corporate Event]
-**🎯 ALIGNMENT:** [Specify which filter condition threshold it cleared]
+IGNORE — return null:
+- AGM or EGM notice
+- Board meeting intimation without agenda
+- Shareholding pattern filing
+- Newspaper advertisement
+- Trading window closure
+- Compliance certificate
+- Analyst meet or concall schedule
+- Transcript or presentation upload
+- CSR or ESG update
+- Loss or duplicate share certificate
+- Voting result formality
+- Exchange clarification
+- General updates without numbers
 
----
+Return exactly: null — if not worth alerting.
 
-**[SENTIMENT EMOJI] SENTIMENT:** [HIGHLY BULLISH / HEAVILY BEARISH / NEUTRAL] (Impact Score: **X.X/10**)
-**📊 POSITIONING:** [Institutional Accumulation Signal / Distribution / Neutral]
+If worth alerting, return ONLY this raw JSON with no markdown:
+{{"tier":"EXTREME or HIGH or MEDIUM","category":"RESULTS or ORDER or PROMOTER or CORPORATE_ACTION or MA or FUNDRAISE or REGULATORY or PHARMA or MANAGEMENT or CREDIT or OTHER","sentiment":"BULLISH or BEARISH or NEUTRAL","score":<3-10>,"summary":"<one line with numbers if available>","market_reaction":"<one line why stock will move>","dividend_amount":"<Rs X per share or null>","dividend_exdate":"<DD-Mon-YYYY or null>","person_name":"<full name or null>","person_designation":"<title or null>","person_action":"<resigned or appointed or null>","order_value_cr":<number or 0>,"key_figures":"<all numbers revenues profits percentages>"}}
 
-**💡 THE BOTTOM LINE:**
-* **Earnings Delta:** [1-2 concise sentences outlining the direct revenue/growth implications]
-* **Margin Impact:** [1 sentence summarizing EBITDA/OPM shifts]
+Company: {company}
+{body}"""
 
-📈 **FUTURE EARNINGS:** [Low / Medium / High]
-🔄 **PE RERATING POTENTIAL:** [Low / Medium / High] [0-100 Prob: **XX**]
-⏳ **HORIZON:** [Intraday / Days / Weeks / Months]
-🎯 **CONFIDENCE:** [XX]% 
-
-⚠️ **KEY RISKS:** [Primary downside threat or risk factor]
-"""
-
-# ==========================================
-# 6. STATION 3 — ROBUST REST API PIPELINE
-# ==========================================
-def execute_ai_analysis(announcement_text: str) -> str:
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    
-    payload = {
-        "contents": [{"parts": [{"text": announcement_text}]}],
-        "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
-        "generationConfig": {"temperature": 0.1}
-    }
-
-    max_retries = 5
-    base_backoff_seconds = 6
-
-    for attempt in range(max_retries):
+    for attempt in range(3):
         try:
-            response = requests.post(url, headers=headers, json=payload, timeout=30)
-            if response.status_code in [429, 503]:
-                sleep_duration = base_backoff_seconds * (2 ** attempt)
-                time.sleep(sleep_duration)
-                continue
-                
-            if response.status_code != 200:
-                response.raise_for_status()
-
-            result_json = response.json()
-            return result_json['candidates'][0]['content']['parts'][0]['text']
-        except Exception:
-            if attempt == max_retries - 1:
-                raise
-            time.sleep(base_backoff_seconds)
-    raise RuntimeError("Unable to communicate with Gemini API backend.")
-
-# ==========================================
-# 7. MAIN DISPATCH PIPELINE
-# ==========================================
-def process_incoming_announcement(announcement: dict):
-    company = announcement.get("company", "").strip()
-    headline = announcement.get("headline", "").strip()
-    raw_text = announcement.get("text", "").strip()
-
-    if not company or not headline:
-        return
-
-    alert_signature = f"{company}_{headline}".replace(" ", "_").lower()
-    processed_cache = load_processed_alerts()
-
-    if alert_signature in processed_cache:
-        return
-
-    if not is_announcement_valuable(headline, raw_text):
-        save_processed_alert(alert_signature)
-        return
-
-    logger.info(f"🔥 Core Signal Picked Up! Analyzing {company}...")
-    payload = f"Company: {company}\nHeadline: {headline}\nFull Text Summary:\n{raw_text}"
-    
-    try:
-        analysis_result = execute_ai_analysis(payload)
-        print(analysis_result)
-        send_to_telegram(analysis_result)
-        save_processed_alert(alert_signature)
-    except Exception as e:
-        logger.error(f"Failed to execute analysis for {company}: {e}")
-
-# ==========================================
-# 8. HIGH-AVAILABILITY CLOUD RSS FEED STREAM
-# ==========================================
-def fetch_live_market_stream():
-    """Parses open public RSS syndication channels to stream clean corporate event feeds."""
-    logger.info("Scanning open public market syndication feeds...")
-    url = "https://www.bseindia.com/include/NewsRss.aspx"
-    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
-    
-    try:
-        response = requests.get(url, headers=headers, timeout=20)
-        if response.status_code != 200:
-            return
-
-        root = ET.fromstring(response.content)
-        for item in root.findall(".//item"):
-            title_text = item.find("title").text if item.find("title") is not None else ""
-            description_text = item.find("description").text if item.find("description") is not None else ""
-            
-            if not title_text:
-                continue
-
-            if " - " in title_text:
-                parts = title_text.split(" - ", 1)
-                company_name = parts[0].strip()
-                headline = parts[1].strip()
+            r    = model.generate_content(prompt)
+            text = r.text.strip().replace("```json","").replace("```","").strip()
+            if text.lower().startswith("null"):
+                return None
+            s = text.find("{")
+            e = text.rfind("}") + 1
+            if s >= 0 and e > s:
+                text = text[s:e]
+            return json.loads(text)
+        except Exception as ex:
+            err = str(ex)
+            if "429" in err:
+                wait = 15 * (attempt + 1)
+                print(f"  Rate limit — waiting {wait}s...")
+                time.sleep(wait)
             else:
-                company_name = "Market Alert Target"
-                headline = title_text.strip()
+                print(f"  Gemini error: {err[:100]}")
+                return None
+    return None
 
-            process_incoming_announcement({
-                "company": company_name,
-                "headline": headline,
-                "text": f"{headline}. Full disclosure context: {description_text}"
-            })
+
+# ── ALERT FORMATTER ───────────────────────────────────────
+def format_alert(company, symbol, result, ann_time, session):
+    tier      = result.get("tier", "MEDIUM")
+    category  = result.get("category", "OTHER")
+    sentiment = result.get("sentiment", "NEUTRAL")
+    score     = result.get("score") or 0
+
+    ie = {"EXTREME":"🚨","HIGH":"🔴","MEDIUM":"🟡"}.get(tier,"🟡")
+    te = {"EXTREME":"🔴 EXTREME","HIGH":"🟠 HIGH","MEDIUM":"🟡 MEDIUM"}.get(tier,"🟡 MEDIUM")
+    se = {"BULLISH":"📈","BEARISH":"📉","NEUTRAL":"➡️"}.get(sentiment,"➡️")
+    ce = {
+        "RESULTS":"📊","ORDER":"📦","PROMOTER":"👤","CORPORATE_ACTION":"🔄",
+        "MA":"🤝","FUNDRAISE":"💰","REGULATORY":"⚖️","PHARMA":"💊",
+        "MANAGEMENT":"👔","CREDIT":"🏦","OTHER":"📌"
+    }.get(category,"📌")
+
+    msg = (
+        f"{ie} *{te} ALERT* | {se} *{sentiment}*\n"
+        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
+        f"🏢 *{company}*\n"
+        f"{ce} *{category}* | ⚡ *{score}/10*\n\n"
+        f"📝 {result.get('summary','')}\n\n"
+    )
+
+    if category == "CORPORATE_ACTION":
+        da = result.get("dividend_amount")
+        de = result.get("dividend_exdate")
+        if da and da != "null":
+            msg += f"💵 *Dividend:* {da} per share\n"
+        if de and de != "null":
+            msg += f"📅 *Ex-date:* {de}\n"
+        msg += "\n"
+
+    elif category == "MANAGEMENT":
+        pn = result.get("person_name")
+        pd = result.get("person_designation")
+        pa = result.get("person_action")
+        if pn and pn != "null": msg += f"👤 *Person:* {pn}\n"
+        if pd and pd != "null": msg += f"🎯 *Role:* {pd}\n"
+        if pa and pa != "null": msg += f"🔄 *Action:* {pa.upper()}\n"
+        msg += "\n"
+
+    elif category == "ORDER":
+        ov = result.get("order_value_cr") or 0
+        if ov > 0:
+            mc  = get_marketcap(session, symbol) if symbol else 0
+            ctx = order_context(ov, mc) if mc > 0 else ""
+            msg += f"📦 *Order Value:* ₹{ov:,.0f} Cr\n"
+            if mc > 0: msg += f"📊 *Mkt Cap:* ₹{mc:,.0f} Cr\n"
+            if ctx:    msg += f"🎯 *Size Context:* {ctx}\n"
+            msg += "\n"
+
+    kf = result.get("key_figures","")
+    if kf and kf not in ["null","None","N/A","",None]:
+        msg += f"🔢 *Key Figures:* {kf}\n\n"
+
+    msg += f"💡 _{result.get('market_reaction','')}_\n\n"
+    msg += f"🕐 {ann_time}"
+    return msg
+
+
+# ── COMMANDS ──────────────────────────────────────────────
+def handle_nifty(chat_id):
+    session = get_nse_session()
+    try:
+        resp = session.get("https://www.nseindia.com/api/allIndices", timeout=15)
+        if resp.status_code != 200:
+            send_msg(chat_id, "⚠️ NSE not responding. Try again shortly.")
+            return
+        data    = resp.json().get("data", [])
+        targets = ["NIFTY 50","NIFTY BANK","NIFTY IT","INDIA VIX"]
+        msg     = f"📊 *LIVE MARKET*\n🕐 {now_ist()}\n\n"
+        for item in data:
+            if item.get("index") in targets:
+                ltp = item.get("last", 0)
+                chg = item.get("change", 0)
+                pct = item.get("percentChange", 0)
+                e   = "🟢" if chg >= 0 else "🔴"
+                msg += f"{e} *{item['index']}*\n"
+                msg += f"   ₹{ltp:,.2f}  ({'+' if chg>=0 else ''}{pct:.2f}%)\n\n"
+        send_msg(chat_id, msg)
     except Exception as e:
-        logger.error(f"Cloud-stream tracking exception encountered: {e}")
+        send_msg(chat_id, f"❌ Error: {e}")
 
-# ==========================================
-# 9. RUNNER CHECKPOINT ENTRYPOINT
-# ==========================================
-if __name__ == "__main__":
-    logger.info("==================================================")
-    logger.info("PRODUCTION SYSTEM ONLINE: RSS COMPATIBILITY LAYER")
-    logger.info("==================================================")
-    
-    # 1. RUN ONCE TEST AT BOOT
-    logger.info("🚀 Triggering immediate pipeline diagnostic test...")
-    test_packet = {
-        "company": "Tata Motors Ltd",
-        "headline": "Secured Electric Bus Supply Contract Valued at Over 5000 Crores",
-        "text": "Tata Motors has won a landmark tender to supply 2,500 advanced electric buses to major metropolitan transport corporations over the next 18 months."
-    }
-    process_incoming_announcement(test_packet)
-    
-    # 2. CONTINUOUS CLEAN PIPELINE SCRIPT LOOP
+def handle_holiday(chat_id):
+    session = get_nse_session()
+    try:
+        resp = session.get("https://www.nseindia.com/api/holiday-master?type=trading", timeout=15)
+        if resp.status_code != 200:
+            send_msg(chat_id, "⚠️ Could not fetch holidays.")
+            return
+        holidays = resp.json().get("CM", [])
+        today    = datetime.now(IST).date()
+        month    = today.strftime("%b").upper()
+        month_h  = [h for h in holidays if month in h.get("tradingDate","").upper()]
+        msg      = f"📅 *MARKET HOLIDAYS — {today.strftime('%B %Y')}*\n\n"
+        if month_h:
+            for h in month_h:
+                msg += f"📌 {h.get('tradingDate','')} — {h.get('description','')}\n"
+        else:
+            msg += "✅ No more holidays this month."
+        send_msg(chat_id, msg)
+    except Exception as e:
+        send_msg(chat_id, f"❌ Error: {e}")
+
+def handle_earnings(chat_id):
+    session = get_nse_session()
+    try:
+        resp = session.get("https://www.nseindia.com/api/event-calendar?index=equities", timeout=15)
+        if resp.status_code != 200:
+            send_msg(chat_id, "⚠️ Could not fetch earnings.")
+            return
+        events    = resp.json()
+        today_fmt = datetime.now(IST).strftime("%Y-%m-%d")
+        results   = [
+            e for e in events
+            if "Financial Results" in e.get("purpose","")
+            and today_fmt in e.get("date","")
+        ]
+        msg = f"📊 *TODAY'S EARNINGS*\n📅 {datetime.now(IST).strftime('%d %b %Y')}\n\n"
+        if results:
+            msg += f"*{len(results)} companies reporting:*\n\n"
+            for r in results[:25]:
+                msg += f"📋 *{r.get('symbol','?')}* — {r.get('companyName','')}\n"
+        else:
+            msg += "No companies scheduled to report today."
+        send_msg(chat_id, msg)
+    except Exception as e:
+        send_msg(chat_id, f"❌ Error: {e}")
+
+def handle_ban(chat_id):
+    try:
+        resp = requests.get(
+            "https://nsearchives.nseindia.com/content/fo/fo_secban.csv",
+            headers={"User-Agent":"Mozilla/5.0"},
+            timeout=15
+        )
+        if resp.status_code != 200:
+            send_msg(chat_id, "⚠️ Could not fetch ban list.")
+            return
+        lines  = resp.text.strip().split("\n")
+        stocks = [l.strip() for l in lines[1:] if l.strip()]
+        msg    = f"🚫 *F&O BAN LIST*\n📅 {datetime.now(IST).strftime('%d %b %Y')}\n\n"
+        if stocks:
+            msg += f"*{len(stocks)} stocks in ban period:*\n\n"
+            for i, s in enumerate(stocks, 1):
+                msg += f"{i}. {s}\n"
+            msg += "\n⚠️ _No fresh F&O positions allowed._"
+        else:
+            msg += "✅ No stocks in ban period today."
+        send_msg(chat_id, msg)
+    except Exception as e:
+        send_msg(chat_id, f"❌ Error: {e}")
+
+def handle_oi(chat_id):
+    session = get_nse_session()
+    try:
+        resp   = session.get(
+            "https://www.nseindia.com/api/live-analysis-oi-spurts-underlyings",
+            timeout=15
+        )
+        stocks = resp.json().get("data",[]) if resp.status_code == 200 else []
+        sig    = [s for s in stocks if (s.get("oiChange") or s.get("perOIChange") or 0) > 15]
+        if not sig:
+            send_msg(chat_id, "📈 *OI Report*\nNo significant OI buildups right now.")
+            return
+        msg = f"📈 *OI BUILDUP ALERT*\n🕐 {now_ist()}\n\n"
+        for s in sig[:8]:
+            oi  = s.get("oiChange") or s.get("perOIChange") or 0
+            ltp = s.get("lastPrice") or s.get("ltp") or 0
+            sym = s.get("symbol","?")
+            e   = "🔴" if oi > 50 else "🟡" if oi > 25 else "🟢"
+            msg += f"{e} *{sym}* — OI +{oi:.1f}% | ₹{ltp}\n"
+        msg += "\n_High OI = institutional activity_"
+        send_msg(chat_id, msg)
+    except Exception as e:
+        send_msg(chat_id, f"❌ Error: {e}")
+
+def handle_help(chat_id):
+    send_msg(chat_id,
+        "🤖 *Market Intelligence Bot*\n\n"
+        "📊 /nifty — Live indices\n"
+        "📅 /holiday — Market holidays\n"
+        "📋 /earnings — Today's results calendar\n"
+        "🚫 /ban — F&O ban list\n"
+        "📈 /oi — OI buildup report\n"
+        "❓ /help — This menu\n\n"
+        "_Auto alerts every 6 min — material events only_\n"
+        "_OI report every 30 min_"
+    )
+
+
+# ── WEBHOOK ───────────────────────────────────────────────
+class WebhookHandler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        length = int(self.headers.get("Content-Length", 0))
+        body   = self.rfile.read(length)
+        self.send_response(200)
+        self.end_headers()
+        try:
+            data    = json.loads(body)
+            message = data.get("message", {})
+            text    = message.get("text", "")
+            chat_id = message.get("chat", {}).get("id")
+            if not chat_id or not text:
+                return
+            cmd = text.split()[0].split("@")[0].lower()
+            print(f"CMD: {cmd}")
+            if   cmd == "/nifty":    handle_nifty(chat_id)
+            elif cmd == "/holiday":  handle_holiday(chat_id)
+            elif cmd == "/earnings": handle_earnings(chat_id)
+            elif cmd == "/ban":      handle_ban(chat_id)
+            elif cmd == "/oi":       handle_oi(chat_id)
+            elif cmd in ["/help","/start"]: handle_help(chat_id)
+        except Exception as e:
+            print(f"Webhook error: {e}")
+
+    def do_GET(self):
+        self.send_response(200)
+        self.end_headers()
+        self.wfile.write(b"Market Intelligence Bot is running.")
+
+    def log_message(self, format, *args):
+        pass
+
+
+# ── AUTO ALERTS ───────────────────────────────────────────
+def check_announcements():
+    print(f"[{now_ist('%H:%M:%S IST')}] Checking NSE...")
+    session = get_nse_session()
+    try:
+        resp = session.get(
+            "https://www.nseindia.com/api/corporate-announcements?index=equities",
+            timeout=15
+        )
+        if resp.status_code != 200:
+            print(f"  NSE status: {resp.status_code}")
+            return
+        anns = resp.json()
+        print(f"  Got {len(anns)} announcements")
+    except Exception as e:
+        print(f"  NSE error: {e}")
+        return
+
+    sent = 0
+    for ann in anns[:25]:
+        ann_id  = ann.get("symbol","") + "||" + ann.get("desc","").strip()
+        if ann_id in seen_ann:
+            continue
+        seen_ann.add(ann_id)
+
+        company  = ann.get("sm_name", ann.get("symbol","Unknown"))
+        symbol   = ann.get("symbol","")
+        subject  = ann.get("desc","").strip()
+        ann_time = ann.get("an_dt", now_ist())
+        pdf_path = ann.get("attchmntFile","")
+
+        if not subject:
+            continue
+
+        if is_junk(subject):
+            print(f"  JUNK | {subject[:50]}")
+            continue
+
+        print(f"  CHECK | {company[:25]} | {subject[:50]}")
+
+        # Only fetch PDF for high-value categories
+        pdf_text = ""
+        subject_up = subject.upper()
+        if pdf_path and any(k in subject_up for k in [
+            "RESULT","FINANCIAL","QUARTER","ANNUAL","PROFIT",
+            "ACQUISITION","MERGER","FRAUD","SEBI","INSOLVENCY","USFDA"
+        ]):
+            pdf_text = fetch_pdf_text(session, pdf_path)
+            if pdf_text:
+                print(f"  PDF: {len(pdf_text)} chars")
+
+        result = classify(company, subject, pdf_text)
+        if not result:
+            print(f"  SKIP | {company[:30]}")
+            continue
+
+        score = result.get("score") or 0
+        print(f"  {score}/10 | {result.get('tier')} | {result.get('sentiment')} | {company[:25]}")
+
+        if score < 3:
+            continue
+
+        msg = format_alert(company, symbol, result, ann_time, session)
+        send_msg(TELEGRAM_CHAT_ID, msg)
+        print(f"  ✅ SENT: {company} | {score}/10")
+        sent += 1
+        time.sleep(4)
+
+    save_seen()
+    print(f"  Done. Sent: {sent}")
+
+
+def check_oi_auto():
+    print(f"[{now_ist('%H:%M:%S IST')}] Checking OI...")
+    session = get_nse_session()
+    try:
+        resp   = session.get(
+            "https://www.nseindia.com/api/live-analysis-oi-spurts-underlyings",
+            timeout=15
+        )
+        stocks = resp.json().get("data",[]) if resp.status_code == 200 else []
+        sig    = [s for s in stocks if (s.get("oiChange") or s.get("perOIChange") or 0) > 20]
+        if not sig:
+            print("  No significant OI spikes")
+            return
+        msg = f"📈 *OI BUILDUP ALERT*\n🕐 {now_ist()}\n\n"
+        for s in sig[:6]:
+            oi  = s.get("oiChange") or s.get("perOIChange") or 0
+            ltp = s.get("lastPrice") or s.get("ltp") or 0
+            sym = s.get("symbol","?")
+            e   = "🔴" if oi > 50 else "🟡" if oi > 25 else "🟢"
+            msg += f"{e} *{sym}* — OI +{oi:.1f}% | ₹{ltp}\n"
+        msg += "\n_Data: NSE live F&O_"
+        send_msg(TELEGRAM_CHAT_ID, msg)
+        print(f"  ✅ OI alert sent")
+    except Exception as e:
+        print(f"  OI error: {e}")
+
+
+def run_scheduler():
+    schedule.every(6).minutes.do(check_announcements)
+    schedule.every(30).minutes.do(check_oi_auto)
     while True:
-        fetch_live_market_stream()
-        time.sleep(45)
+        schedule.run_pending()
+        time.sleep(10)
+
+
+# ── ENTRY POINT ───────────────────────────────────────────
+if __name__ == "__main__":
+    print("🚀 Market Intelligence Bot starting...")
+    load_seen()
+    threading.Thread(target=run_scheduler, daemon=True).start()
+    port   = int(os.environ.get("PORT", 8080))
+    server = HTTPServer(("0.0.0.0", port), WebhookHandler)
+    print(f"✅ Server on port {port}")
+    send_msg(TELEGRAM_CHAT_ID,
+        "✅ *Market Intelligence Bot LIVE*\n\n"
+        "📡 NSE announcements — every 6 min\n"
+        "🧠 AI filter — material events only\n"
+        "📈 OI alerts — every 30 min\n\n"
+        "Type /help for commands"
+    )
+    threading.Thread(target=check_announcements, daemon=True).start()
+    server.serve_forever()
