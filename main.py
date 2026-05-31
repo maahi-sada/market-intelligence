@@ -1,277 +1,212 @@
 import os
-import io
 import time
-import json
 import logging
-import zipfile
-import requests
-import pypdf
-import pytz
-from datetime import datetime, timezone
-import google.generativeai as genai
-from typing import Dict, Any, Optional
+from datetime import datetime
+from google import genai
+from google.genai import types
+from google.genai.errors import APIError
 
-# --- CORE SETTINGS ---
-logging.basicConfig(level=logging.INFO, format="%(asctime)s [%(levelname)s] %(message)s")
-IST = pytz.timezone("Asia/Kolkata")
+# ==========================================
+# 1. LOGGING & INITIALIZATION CONFIGURATION
+# ==========================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("MARKET_ENGINE")
 
-# --- PROTECTION: KEYS PULLED FROM ENVIRONMENT ONLY ---
-TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
-TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
+# Load API Key from Railway Environment Variables
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+if not GEMINI_API_KEY:
+    logger.critical("CRITICAL ERROR: GEMINI_API_KEY environment variable is missing!")
+    raise ValueError("Please set GEMINI_API_KEY in your Railway dashboard variables.")
 
-if not GEMINI_API_KEY or not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID:
-    logging.critical("[CONFIG ERROR] Missing required Environment Variables in Railway settings panel!")
+# Initialize the official Google GenAI Client
+client = genai.Client(api_key=GEMINI_API_KEY)
 
-genai.configure(api_key=GEMINI_API_KEY)
-ai_model = genai.GenerativeModel("gemini-2.5-flash")
+# Local files to maintain persistent memory on Railway filesystem
+SEEN_ALERTS_FILE = "processed_alerts_cache.txt"
 
-SEEN_ANN_CACHE = set()
-CACHE_FILE = "seen_announcements.json"
-
+# ==========================================
+# 2. FILTER #1 — PROGRAMMATIC JUNK FILTER
+# ==========================================
+# Instantly drops low-value administrative noise to save API quotas
 JUNK_KEYWORDS = [
-    "trading window closure", "routine board meeting", "agm notice", "egm notice",
-    "newspaper publication", "compliance certificate", "investor meeting schedule",
-    "generic presentation", "change of address", "share certificate", "procedural update",
-    "loss of share", "voting result", "transcript upload", "analyst meet schedule",
-    "corporate governance report", "re-appointment of statutory auditor"
+    "trading window closure", "board meeting schedule", "agm notice", 
+    "egm notice", "newspaper publication", "compliance disclosure", 
+    "investor meeting schedule", "generic presentation", "address change", 
+    "share certificate", "procedural update", "loss of certificate",
+    "analyst call audio", "transcript of analyst"
 ]
 
-def load_cache():
-    global SEEN_ANN_CACHE
-    if os.path.exists(CACHE_FILE):
-        try:
-            with open(CACHE_FILE, "r") as f:
-                SEEN_ANN_CACHE = set(json.load(f))
-                logging.info(f"[CACHE] Loaded {len(SEEN_ANN_CACHE)} tracking anchors.")
-        except Exception as e:
-            logging.error(f"[CACHE] Error: {e}")
+def is_announcement_valuable(headline: str, text: str) -> bool:
+    combined_content = f"{headline} {text}".lower()
+    for keyword in JUNK_KEYWORDS:
+        if keyword in combined_content:
+            logger.info(f"Dropped Junk Traffic programmatically: [{keyword}] found in headline.")
+            return False
+    return True
 
-def save_cache():
-    try:
-        export_list = list(SEEN_ANN_CACHE)[-3000:]
-        with open(CACHE_FILE, "w") as f:
-            json.dump(export_list, f)
-    except Exception as e:
-        logging.error(f"[CACHE] Backup fail: {e}")
+# ==========================================
+# 3. STATION 2 — DEDUPLICATION MEMORY ENGINE
+# ==========================================
+def load_processed_alerts() -> set:
+    """Loads previously processed alert unique signatures from disk."""
+    if os.path.exists(SEEN_ALERTS_FILE):
+        with open(SEEN_ALERTS_FILE, "r") as f:
+            return set(line.strip() for line in f if line.strip())
+    return set()
 
-# --- PROTECTION NETWORK OVERLAY ---
-class InstitutionalSession:
-    def __init__(self):
-        self.session = requests.Session()
-        self.user_agents = [
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
-            "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.4 Safari/605.1.15"
-        ]
-        self.ua_index = 0
-        self.rotate_identity()
+def save_processed_alert(alert_id: str):
+    """Appends a new unique alert signature to disk memory."""
+    with open(SEEN_ALERTS_FILE, "a") as f:
+        f.write(f"{alert_id}\n")
 
-    def rotate_identity(self):
-        ua = self.user_agents[self.ua_index % len(self.user_agents)]
-        self.ua_index += 1
-        self.session.headers.update({
-            "User-Agent": ua,
-            "Accept": "application/json, text/plain, */*",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.bseindia.com/",
-            "Origin": "https://www.bseindia.com"
-        })
+# ==========================================
+# 4. SYSTEM PROMPT & INSTITUTIONAL LOGIC
+# ==========================================
+SYSTEM_INSTRUCTION = """
+Act as a Bloomberg Terminal, institutional equity research desk, and event-driven hedge fund analyst.
+Your primary goal is to analyze corporate announcements and extract ONLY high-conviction, market-moving alerts.
 
-    def fetch_json(self, url: str, params: Optional[Dict] = None) -> Optional[Any]:
-        try:
-            response = self.session.get(url, params=params, timeout=12)
-            if response.status_code == 200:
-                ct = response.headers.get("Content-Type", "").lower()
-                if "application/json" in ct or "text/plain" in ct:
-                    return response.json()
-                else:
-                    self.rotate_identity()
-                    return None
-            elif response.status_code in [401, 403]:
-                self.rotate_identity()
-        except Exception:
-            pass
-        return None
+Enforce the following threshold filters:
+- Orders: Value >10% of market cap
+- Financial Results: Revenue/EBITDA/PAT beat or miss >10%, OPM change >200 bps
+- Guidance: Revision >10%
+- Corporate Actions: Buybacks >3% of market cap, major M&A, demergers
+- Ownership: Promoter changes >1%, significant institutional/insider accumulation
+- Capex: Expansion >10% of market cap
+- Regulatory: USFDA approvals, major licenses, mining/environmental clearances with clear revenue impacts.
 
-    def fetch_file_content(self, url: str) -> str:
-        try:
-            resp = self.session.get(url, timeout=20)
-            if resp.status_code != 200: return ""
-            content_bytes = resp.content
-            
-            if url.lower().endswith(".zip") or content_bytes.startswith(b'PK\x03\x04'):
-                extracted_text = []
-                with zipfile.ZipFile(io.BytesIO(content_bytes)) as z:
-                    for filename in z.namelist():
-                        if filename.lower().endswith(".pdf"):
-                            with z.open(filename) as pdf_file:
-                                text = self._extract_pdf_text(io.BytesIO(pdf_file.read()))
-                                if text: extracted_text.append(text)
-                return "\n".join(extracted_text)[:8000]
-            
-            return self._extract_pdf_text(io.BytesIO(content_bytes))[:8000]
-        except Exception:
-            return ""
+Format your output EXACTLY as follows:
+STOCK:
+SECTOR:
+CMP:
+MARKET CAP:
+F&O: Yes/No
+EVENT:
+IMPACT SCORE: 0-10
+CONVICTION: Low / Medium / High
+DIRECTION: Bullish / Bearish / Neutral
+WHY IT MATTERS:
+FUTURE EARNINGS IMPACT: Low / Medium / High
+PE RERATING IMPACT: Low / Medium / High
+TIME HORIZON: Intraday / Days / Weeks / Months
+RISKS:
+CONFIDENCE: %
+"""
 
-    def _extract_pdf_text(self, stream) -> str:
-        try:
-            reader = pypdf.PdfReader(stream)
-            pages_text = [p.extract_text() for p in reader.pages[:6] if p.extract_text()]
-            return "\n".join(pages_text)
-        except Exception:
-            return ""
-
-# --- QUANT & AI ALGORITHM MODULES ---
-def get_derivatives_positioning(session: InstitutionalSession, symbol: str) -> Dict[str, Any]:
-    url = "https://www.nseindia.com/api/live-analysis-oi-spurts-underlyings"
-    data = session.fetch_json(url)
-    out = {"oi_change_pct": 0.0, "positioning": "N/A"}
-    if data and "data" in data:
-        for entry in data["data"]:
-            if entry.get("symbol") == symbol:
-                oi_chg = float(entry.get("perOIChange", 0))
-                p_chg = float(entry.get("pchange", 0))
-                out["oi_change_pct"] = oi_chg
-                if oi_chg > 5 and p_chg > 0.5: out["positioning"] = "📈 LONG BUILDUP"
-                elif oi_chg > 5 and p_chg < -0.5: out["positioning"] = "📉 SHORT BUILDUP"
-                elif oi_chg < -5 and p_chg > 0.5: out["positioning"] = "🔥 SHORT COVERING"
-                elif oi_chg < -5 and p_chg < -0.5: out["positioning"] = "💨 LONG UNWINDING"
-                break
-    return out
-
-def analyze_announcement_payload(company: str, subject: str, body_text: str) -> Optional[Dict[str, Any]]:
-    # Dynamic rate limiter: Puts a strict 5.5-second pacing gap between calls
-    # This maintains ~11 requests per minute, staying well under the free tier limit
-    time.sleep(5.5)
-    
-    prompt = f"""
-    Act as an Event-Driven Hedge Fund Analyst. Analyze this Indian corporate disclosure.
-    FILTERS:
-    1. ORDERS: Value >10% of market capitalization.
-    2. RESULTS: Revenue/EBITDA/PAT beat/miss >10% or OPM margin change >200 bps.
-    3. STRATEGIC ACTIONS: Buybacks (>3% float), major M&A, demergers, promoter changes (>1%).
-    4. REGULATORY: USFDA decisions, environmental clearances.
-
-    Company Name: {company} Subject: {subject}
-    Filing Text: {body_text[:6000] if body_text.strip() else 'Use Headline Subject only.'}
-
-    Output exact JSON string or return 'null'. Do not format with markdown wrappers.
-    Format:
-    {{
-        "is_material": true,
-        "tier": "TIER_1",
-        "impact_score": 8.5,
-        "conviction": "High",
-        "direction": "Bullish",
-        "summary": "Core outcome statement.",
-        "why_it_matters": "Hedge fund structural investment rationale thesis.",
-        "future_earnings_impact": "High",
-        "pe_rerating_probability": 80.0,
-        "pe_derating_probability": 0.0,
-        "time_horizon": "Months",
-        "risks": "Execution speed blocks.",
-        "confidence_pct": 95.0,
-        "sector_transmission": {{"direct_beneficiaries": ["Sectors"], "indirect_beneficiaries": ["Sectors"], "losers": ["Sectors"]}}
-    }}
+# ==========================================
+# 5. STATION 3 — PROTECTED AI EXECUTION ENGINE
+# ==========================================
+def execute_ai_analysis(announcement_text: str) -> str:
     """
-    try:
-        response = ai_model.generate_content(prompt)
-        text_clean = response.text.strip().replace("```json", "").replace("```", "").strip()
-        if text_clean.lower() == "null" or not text_clean: return None
-        return json.loads(text_clean)
-    except Exception as e:
-        logging.error(f"[AI RATE WARNING] Bypassed prompt exception: {e}")
-        return None
+    Executes content generation using gemini-2.5-flash with a built-in
+    defensive loop against 429 Rate Limits and 503 Service Overloads.
+    """
+    max_retries = 5
+    base_backoff_seconds = 6
 
-def transmit_alert_to_terminal(company: str, symbol: str, exchange: str, analysis: Dict[str, Any], oi_data: Dict[str, Any]):
-    sentiment_emoji = {"BULLISH": "📈", "BEARISH": "📉", "NEUTRAL": "➡️"}.get(analysis['direction'].upper(), "➡️")
-    tier_icon = "🚨" if "1" in analysis['tier'] else "⚠️"
-    
-    message = (
-        f"{tier_icon} *{analysis['tier'].upper()} ALERT* | {sentiment_emoji} *{analysis['direction'].upper()}*\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🏢 *STOCK:* {company} ({symbol}) | *EXCHANGE:* {exchange}\n"
-        f"📊 *IMPACT SCORE:* `{analysis['impact_score']}/10` | *CONVICTION:* `{analysis['conviction'].upper()}`\n\n"
-        f"📝 *EVENT:* {analysis['summary']}\n\n"
-        f"💡 *WHY IT MATTERS:* {analysis['why_it_matters']}\n\n"
-        f"🚀 *FUTURE EARNINGS IMPACT:* `{analysis['future_earnings_impact'].upper()}`\n"
-        f"📈 *PE RERATING PROBABILITY:* `{analysis['pe_rerating_probability']}%`\n"
-        f"📦 *F&O POSITIONING:* `{oi_data['positioning']}`\n"
-        f"⚠️ *KEY RISKS:* _{analysis['risks']}_\n\n"
-        f"🌐 *SECTOR TRANSMISSION:*\n"
-        f"🔹 *Direct:* {', '.join(analysis['sector_transmission']['direct_beneficiaries'])}\n"
-        f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🕐 _Timestamp: {datetime.now(IST).strftime('%H:%M:%S')} IST_"
-    )
-    try:
-        requests.post(f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage", 
-                      json={"chat_id": TELEGRAM_CHAT_ID, "text": message, "parse_mode": "Markdown"}, timeout=12)
-    except Exception as e:
-        logging.error(f"[TELEGRAM DROP] Fail: {e}")
-
-# --- TIMELINE PROCESSORS ---
-def process_nse_feed(session: InstitutionalSession):
-    url = "https://www.nseindia.com/api/corporate-announcements?index=equities"
-    payload = session.fetch_json(url)
-    if not payload or not isinstance(payload, list): return
-
-    # Process only the 8 most recent updates to optimize API usage
-    for item in payload[:8]:
-        desc = item.get("desc", "").strip()
-        symbol = item.get("symbol", "")
-        company = item.get("sm_name", symbol)
-        tracking_key = f"NSE_{symbol}_{item.get('an_dt')}_{desc[:15]}"
-        
-        if tracking_key in SEEN_ANN_CACHE: continue
-        SEEN_ANN_CACHE.add(tracking_key)
-        
-        if any(keyword in desc.lower() for keyword in JUNK_KEYWORDS): continue
-        
-        pdf_path = item.get("attchmntFile", "")
-        pdf_text = session.fetch_file_content(f"https://www.nseindia.com{pdf_path}") if pdf_path else ""
-            
-        analysis = analyze_announcement_payload(company, desc, pdf_text)
-        if analysis and analysis.get("is_material"):
-            oi_metrics = get_derivatives_positioning(session, symbol)
-            transmit_alert_to_terminal(company, symbol, "NSE", analysis, oi_metrics)
-
-def process_bse_feed(session: InstitutionalSession):
-    url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryNew/w"
-    params = {"mode": "2", "category": "Company Update", "scripcode": "", "searchtype": "P"}
-    payload = session.fetch_json(url, params=params)
-    if not payload or not isinstance(payload, list): return
-
-    for item in payload[:8]:
-        scrip_code = item.get("SCRIP_CD", "")
-        company = item.get("SLONGNAME", scrip_code)
-        headline = item.get("HEADLINE", "").strip()
-        details = item.get("NEWSSUBJECT", "").strip()
-        tracking_key = f"BSE_{scrip_code}_{item.get('NEWS_DT')}_{headline[:15]}"
-        
-        if tracking_key in SEEN_ANN_CACHE: continue
-        SEEN_ANN_CACHE.add(tracking_key)
-        
-        if any(keyword in headline.lower() or keyword in details.lower() for keyword in JUNK_KEYWORDS): continue
-            
-        pdf_link = item.get("ATTACHMENTNAME", "")
-        pdf_text = session.fetch_file_content(f"https://www.bseindia.com/xml-data/corpfiling/AttachLive/{pdf_link}") if pdf_link else ""
-            
-        analysis = analyze_announcement_payload(company, headline, pdf_text if pdf_text else details)
-        if analysis and analysis.get("is_material"):
-            transmit_alert_to_terminal(company, scrip_code, "BSE", analysis, {"oi_change_pct": 0.0, "positioning": "N/A"})
-
-def global_monitoring_loop():
-    session = InstitutionalSession()
-    load_cache()
-    logging.info("[SYSTEM ENGINE READY] Free-tier safety matrix successfully deployed.")
-    while True:
+    for attempt in range(max_retries):
         try:
-            process_nse_feed(session)
-            process_bse_feed(session)
-            save_cache()
-        except Exception as e:
-            logging.critical(f"[LOOP ANOMALY RECOVERED] Restructuring context thread: {e}")
-        time.sleep(60)
+            # Official Google GenAI SDK v1.0.0 signature
+            response = client.models.generate_content(
+                model='gemini-2.5-flash',
+                contents=announcement_text,
+                config=types.GenerateContentConfig(
+                    system_instruction=SYSTEM_INSTRUCTION,
+                    temperature=0.1,  # Kept low for factual, institutional precision
+                )
+            )
+            
+            # Free Tier safety delay pacing: enforce 5-second sleep after successful calls
+            time.sleep(5)
+            return response.text
 
+        except APIError as e:
+            # Catch Rate Limits (429) or Service Overloads (503) safely
+            if e.code in [429, 503]:
+                sleep_duration = base_backoff_seconds * (2 ** attempt)
+                logger.warning(f"Rate limit / API error ({e.code}) encountered. Sleeping for {sleep_duration}s and retrying...")
+                time.sleep(sleep_duration)
+            else:
+                logger.error(f"Unrecoverable Google API Error: {e}")
+                raise e
+        except Exception as e:
+            logger.error(f"Unexpected system execution error: {e}")
+            raise e
+
+    raise RuntimeError("System failed to execute prompt after maximum backoff retry cycles due to continuous 429 Rate Limits.")
+
+# ==========================================
+# 6. CENTRAL DISPATCH / ALERT PIPELINE
+# ==========================================
+def process_incoming_announcement(announcement: dict):
+    """
+    Core pipeline entry point processing individual inbound raw data packets.
+    Expects announcement dict keys: 'company', 'headline', 'text'
+    """
+    company = announcement.get("company", "").strip()
+    headline = announcement.get("headline", "").strip()
+    raw_text = announcement.get("text", "").strip()
+
+    # Step 1: Compute a deterministic unique signature to block duplicates
+    alert_signature = f"{company}_{headline}".replace(" ", "_").lower()
+    processed_cache = load_processed_alerts()
+
+    if alert_signature in processed_cache:
+        logger.info(f"Duplicate Alert Blocks initiated for {company}: Engine bypassed redundant feed.")
+        return
+
+    # Step 2: Clear noise via text parsing rules
+    if not is_announcement_valuable(headline, raw_text):
+        return
+
+    # Step 3: Run AI analysis inside the protected framework
+    logger.info(f"Processing high-value, unique event for {company} via Gemini Engine...")
+    payload = f"Company: {company}\nHeadline: {headline}\nFull Announcement Text:\n{raw_text}"
+    
+    analysis_result = execute_ai_analysis(payload)
+
+    # Step 4: Dispatch output and save state
+    print("\n==================================================")
+    print(analysis_result)
+    print("==================================================\n")
+    
+    # Commit to memory to prevent duplicates in the future
+    save_processed_alert(alert_signature)
+
+# ==========================================
+# 7. MAIN EVENT LOOP RUNNER
+# ==========================================
 if __name__ == "__main__":
-    global_monitoring_loop()
+    logger.info("==================================================")
+    logger.info("SYSTEM ENGINE READY: Institutional Intelligence Active")
+    logger.info("==================================================")
+    
+    # Mock data feed simulation mimicking real-time ingestion loop
+    mock_incoming_stream = [
+        {
+            "company": "Tata Power",
+            "headline": "Trading Window Closure Announcement Q2",
+            "text": "This is to inform that the trading window for dealing in securities will be closed..."
+        },
+        {
+            "company": "Larsen & Toubro LLC",
+            "headline": "Secured Mega Order Win from Middle East Value Exceeding 12000 Crores",
+            "text": "The business vertical of L&T has secured a milestone order from an international client for infrastructure building worth 12500 INR Crores."
+        },
+        {
+            "company": "Larsen & Toubro LLC",
+            "headline": "Secured Mega Order Win from Middle East Value Exceeding 12000 Crores",
+            "text": "Duplicate feed incoming from another data channel..."
+        }
+    ]
+
+    for data_packet in mock_incoming_stream:
+        process_incoming_announcement(data_packet)
+
+    # Keep container alive on Railway
+    while True:
+        time.sleep(3600)
