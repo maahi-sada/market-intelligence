@@ -2,9 +2,6 @@ import os
 import time
 import logging
 import requests
-from google import genai
-from google.genai import types
-from google.genai.errors import APIError
 
 # ==========================================
 # 1. LOGGING & INITIALIZATION CONFIGURATION
@@ -16,21 +13,17 @@ logging.basicConfig(
 )
 logger = logging.getLogger("MARKET_ENGINE")
 
-# Load Environment Variables from Railway
+# Load Environment Variables from Railway (UPDATED TO MATCH YOUR DASHBOARD)
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
-TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
+TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")  # Changed from TELEGRAM_BOT_TOKEN
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
-# HARD RAILWAY CHECKPOINTS: Stop execution immediately if environment variables are corrupted
 if not GEMINI_API_KEY:
     logger.critical("❌ BOOT ERROR: GEMINI_API_KEY env variable is completely empty or undetected by Railway!")
-    raise ValueError("Please check your Railway Dashboard -> Variables tab and ensure GEMINI_API_KEY is spelled correctly.")
+    raise ValueError("Please check your Railway Dashboard -> Variables tab.")
 
 if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-    logger.warning("⚠️ TELEGRAM NOTICE: Bot tokens or Chat IDs are empty. System will print alerts to logs only.")
-
-# Initialize client using the strictly documented structural parameter assignment
-client = genai.Client(api_key=GEMINI_API_KEY)
+    logger.warning("⚠️ TELEGRAM NOTICE: Bot tokens or Chat IDs are empty. Printing to logs only.")
 
 # Local cache file for Railway storage memory
 SEEN_ALERTS_FILE = "processed_alerts_cache.txt"
@@ -129,39 +122,63 @@ Format your response EXACTLY like this layout structure using standard markdown 
 """
 
 # ==========================================
-# 6. STATION 3 — PROTECTED AI EXECUTION ENGINE
+# 6. STATION 3 — DIRECT HTTP REST EXECUTION ENGINE
 # ==========================================
 def execute_ai_analysis(announcement_text: str) -> str:
+    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.5-flash:generateContent?key={GEMINI_API_KEY}"
+    
+    headers = {
+        "Content-Type": "application/json"
+    }
+    
+    payload = {
+        "contents": [
+            {
+                "parts": [
+                    {"text": announcement_text}
+                ]
+            }
+        ],
+        "systemInstruction": {
+            "parts": [
+                {"text": SYSTEM_INSTRUCTION}
+            ]
+        },
+        "generationConfig": {
+            "temperature": 0.1
+        }
+    }
+
     max_retries = 5
     base_backoff_seconds = 6
 
     for attempt in range(max_retries):
         try:
-            # Native SDK content payload call
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=announcement_text,
-                config=types.GenerateContentConfig(
-                    system_instruction=SYSTEM_INSTRUCTION,
-                    temperature=0.1,
-                )
-            )
-            time.sleep(5)
-            return response.text
-
-        except APIError as e:
-            if e.code in [429, 503]:
+            response = requests.post(url, headers=headers, json=payload, timeout=30)
+            
+            if response.status_code in [429, 503]:
                 sleep_duration = base_backoff_seconds * (2 ** attempt)
-                logger.warning(f"Rate limit hit ({e.code}). Sleeping {sleep_duration}s before retry...")
+                logger.warning(f"Rate limit hit ({response.status_code}). Sleeping {sleep_duration}s...")
                 time.sleep(sleep_duration)
-            else:
-                logger.error(f"Google Cloud API Error: {e}")
-                raise e
-        except Exception as e:
-            logger.error(f"System execution error: {e}")
-            raise e
+                continue
+                
+            if response.status_code != 200:
+                logger.error(f"Google Server Error ({response.status_code}): {response.text}")
+                response.raise_for_status()
 
-    raise RuntimeError("Continuous 429 Rate Limits from API Provider.")
+            result_json = response.json()
+            ai_text = result_json['candidates'][0]['content']['parts'][0]['text']
+            
+            time.sleep(5)
+            return ai_text
+
+        except Exception as e:
+            if attempt == max_retries - 1:
+                logger.error(f"System error after max retries: {e}")
+                raise e
+            time.sleep(base_backoff_seconds)
+
+    raise RuntimeError("Continuous connectivity issues with API backend.")
 
 # ==========================================
 # 7. CENTRAL DISPATCH / ALERT PIPELINE
@@ -196,7 +213,7 @@ def process_incoming_announcement(announcement: dict):
 # ==========================================
 if __name__ == "__main__":
     logger.info("==================================================")
-    logger.info("SYSTEM ENGINE READY: Strict Security Checks Loaded")
+    logger.info("SYSTEM ENGINE READY: REST + Custom Variable Map")
     logger.info("==================================================")
     
     mock_incoming_stream = [
