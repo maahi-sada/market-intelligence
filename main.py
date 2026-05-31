@@ -111,11 +111,11 @@ def get_marketcap(session, symbol):
         pass
     return 0
     def get_stock_info(session, symbol):
-    try:
+        try:
         resp = session.get(
             f"https://www.nseindia.com/api/quote-equity?symbol={symbol}",
             timeout=10
-        )
+            )
         if resp.status_code != 200:
             return {}
         d     = resp.json()
