@@ -1,4 +1,4 @@
-requests
-schedule
-groq
-pypdf
+requests==2.31.0
+google-generativeai==0.7.0
+schedule==1.2.1
+pypdf==4.2.0
