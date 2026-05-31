@@ -21,15 +21,16 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
+# HARD RAILWAY CHECKPOINTS: Stop execution immediately if environment variables are corrupted
 if not GEMINI_API_KEY:
-    logger.critical("CRITICAL ERROR: GEMINI_API_KEY is missing!")
-    raise ValueError("Set GEMINI_API_KEY in Railway variables.")
+    logger.critical("❌ BOOT ERROR: GEMINI_API_KEY env variable is completely empty or undetected by Railway!")
+    raise ValueError("Please check your Railway Dashboard -> Variables tab and ensure GEMINI_API_KEY is spelled correctly.")
 
-# FIX: Force http_options to use API Key directly to bypass OAuth/Vertex token errors
-client = genai.Client(
-    api_key=GEMINI_API_KEY,
-    http_options={'headers': {'X-Goog-Api-Key': GEMINI_API_KEY}}
-)
+if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
+    logger.warning("⚠️ TELEGRAM NOTICE: Bot tokens or Chat IDs are empty. System will print alerts to logs only.")
+
+# Initialize client using the strictly documented structural parameter assignment
+client = genai.Client(api_key=GEMINI_API_KEY)
 
 # Local cache file for Railway storage memory
 SEEN_ALERTS_FILE = "processed_alerts_cache.txt"
@@ -40,7 +41,6 @@ SEEN_ALERTS_FILE = "processed_alerts_cache.txt"
 def send_to_telegram(text_message: str):
     """Sends the engaging, structured alert straight to your Telegram Chat."""
     if not TELEGRAM_BOT_TOKEN or not TELEGRAM_CHAT_ID:
-        logger.warning("Telegram variables missing. Alert printed to console logs only.")
         return
 
     url = f"https://api.telegram.org/bot{TELEGRAM_BOT_TOKEN}/sendMessage"
@@ -52,9 +52,7 @@ def send_to_telegram(text_message: str):
     
     try:
         response = requests.post(url, json=payload, timeout=10)
-        if response.status_code == 200:
-            logger.info("Alert successfully dispatched to Telegram!")
-        else:
+        if response.status_code != 200:
             logger.error(f"Telegram Delivery Failed: {response.text}")
     except Exception as e:
         logger.error(f"Failed to connect to Telegram API: {e}")
@@ -139,6 +137,7 @@ def execute_ai_analysis(announcement_text: str) -> str:
 
     for attempt in range(max_retries):
         try:
+            # Native SDK content payload call
             response = client.models.generate_content(
                 model='gemini-2.5-flash',
                 contents=announcement_text,
@@ -172,7 +171,6 @@ def process_incoming_announcement(announcement: dict):
     headline = announcement.get("headline", "").strip()
     raw_text = announcement.get("text", "").strip()
 
-    # Deduplication barrier
     alert_signature = f"{company}_{headline}".replace(" ", "_").lower()
     processed_cache = load_processed_alerts()
 
@@ -180,21 +178,17 @@ def process_incoming_announcement(announcement: dict):
         logger.info(f"Duplicate Alert Blocked for {company}.")
         return
 
-    # Junk administrative barrier
     if not is_announcement_valuable(headline, raw_text):
         return
 
-    # Process Active Event
     logger.info(f"Processing high-value event for {company}...")
     payload = f"Company: {company}\nHeadline: {headline}\nText:\n{raw_text}"
     
     analysis_result = execute_ai_analysis(payload)
 
-    # DISPATCH: Print to console and send to active Telegram Channel
     print(analysis_result)
     send_to_telegram(analysis_result)
     
-    # Save signature to cache file
     save_processed_alert(alert_signature)
 
 # ==========================================
@@ -202,10 +196,9 @@ def process_incoming_announcement(announcement: dict):
 # ==========================================
 if __name__ == "__main__":
     logger.info("==================================================")
-    logger.info("SYSTEM ENGINE READY: Telegram Formatting Enabled")
+    logger.info("SYSTEM ENGINE READY: Strict Security Checks Loaded")
     logger.info("==================================================")
     
-    # Live Emulated Pipeline Mock Stream
     mock_incoming_stream = [
         {
             "company": "Larsen & Toubro LLC",
@@ -217,6 +210,5 @@ if __name__ == "__main__":
     for data_packet in mock_incoming_stream:
         process_incoming_announcement(data_packet)
 
-    # Keep background worker process alive on Railway platform
     while True:
         time.sleep(3600)
