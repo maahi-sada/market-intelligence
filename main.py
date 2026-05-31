@@ -15,7 +15,7 @@ TELEGRAM_CHAT_ID = "787902453"
 GEMINI_API_KEY = "AQ.Ab8RN6KGEW36r2cX1-qepXdK8tqyrZoJqnJb2dmbPdX61HFi-Q"
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-1.5-flash-8b")
+model = genai.GenerativeModel("gemini-2.0-flash-lite")
 
 seen_ann = set()
 SEEN_FILE = "/app/seen_ann.json"
