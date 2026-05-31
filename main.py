@@ -2,6 +2,7 @@ import os
 import time
 import logging
 import requests
+import xml.etree.ElementTree as ET
 
 # ==========================================
 # 1. LOGGING & SYSTEM CONFIGURATION
@@ -19,7 +20,7 @@ TELEGRAM_BOT_TOKEN = os.getenv("TELEGRAM_TOKEN")
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID")
 
 if not GEMINI_API_KEY:
-    logger.critical("❌ BOOT ERROR: GEMINI_API_KEY is completely missing in Railway variables!")
+    logger.critical("❌ BOOT ERROR: GEMINI_API_KEY is missing in Railway variables!")
     raise ValueError("Set GEMINI_API_KEY in your Railway dashboard.")
 
 # Local cache file to maintain persistent alert memory on Railway filesystem
@@ -186,80 +187,52 @@ def process_incoming_announcement(announcement: dict):
         logger.error(f"Failed to execute analysis for {company}: {e}")
 
 # ==========================================
-# 8. LIVE ADAPTIVE MARKET CORES
+# 8. HIGH-AVAILABILITY CLOUD RSS FEED STREAM
 # ==========================================
 def fetch_live_market_stream():
-    """Polls public market feeds safely. Switches automatically to a backup channel if firewalled."""
-    
-    # Core Endpoint 1: Standard Public Gateway
-    url = "https://api.bseindia.com/BseNewsPageAPI/api/NewsData/w_NewsDataSelect"
-    
-    # Advanced Browser Identity Simulation to bypass basic firewall layers
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Origin": "https://www.bseindia.com",
-        "Referer": "https://www.bseindia.com/"
-    }
+    """Parses open public RSS syndication channels to stream clean corporate event feeds."""
+    logger.info("Scanning open public market syndication feeds...")
+    url = "https://www.bseindia.com/include/NewsRss.aspx"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
     
     try:
-        response = requests.get(url, headers=headers, params={"pType": "G", "pCategory": "A"}, timeout=15)
-        
-        # HTML Shield Check: If the server answers with text markup instead of JSON data, drop to emergency backup
-        if response.status_code != 200 or "html" in response.headers.get("Content-Type", "").lower() or response.text.strip().startswith("<"):
-            logger.warning("BSE Channel firewalled or returned text/HTML. Shifting tracking to backup channel...")
-            fetch_backup_market_stream()
+        response = requests.get(url, headers=headers, timeout=20)
+        if response.status_code != 200:
             return
 
-        items = response.json()
-        if items and isinstance(items, list):
-            for item in items:
-                process_incoming_announcement({
-                    "company": item.get("NEWSSUB", ""),
-                    "headline": item.get("HEADLINE", ""),
-                    "text": f"{item.get('HEADLINE', '')}. Details: {item.get('MORE', '')}"
-                })
-            return
+        root = ET.fromstring(response.content)
+        for item in root.findall(".//item"):
+            title_text = item.find("title").text if item.find("title") is not None else ""
+            description_text = item.find("description").text if item.find("description") is not None else ""
+            
+            if not title_text:
+                continue
 
-    except Exception as e:
-        logger.warning(f"Primary Ingestion Channel down: {e}. Moving to backup feed...")
-        fetch_backup_market_stream()
+            if " - " in title_text:
+                parts = title_text.split(" - ", 1)
+                company_name = parts[0].strip()
+                headline = parts[1].strip()
+            else:
+                company_name = "Market Alert Target"
+                headline = title_text.strip()
 
-def fetch_backup_market_stream():
-    """Backup data stream to capture corporate actions when primary sources throttle requests."""
-    url = "https://content.moneycontrol.com/mcapi/v1/stockinfo/corporate-action"
-    headers = {
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
-    }
-    try:
-        # Pulls live feed of real-time market updates
-        response = requests.get(url, headers=headers, params={"limit": 15, "page": 1}, timeout=15)
-        if response.status_code != 200 or response.text.strip().startswith("<"):
-            logger.error("All data stream channels throttled by provider firewalls. Pacing execution...")
-            return
-
-        data = response.json()
-        items = data.get("data", [])
-        for item in items:
             process_incoming_announcement({
-                "company": item.get("comp_name", ""),
-                "headline": item.get("heading", ""),
-                "text": f"{item.get('heading', '')}. Event Description: {item.get('details', '')}"
+                "company": company_name,
+                "headline": headline,
+                "text": f"{headline}. Full disclosure context: {description_text}"
             })
     except Exception as e:
-        logger.error(f"Backup tracking engine exception: {e}")
+        logger.error(f"Cloud-stream tracking exception encountered: {e}")
 
 # ==========================================
-# ==========================================
-# 9. RUNNER CHECKPOINT ENTRYPOINT (DIAGNOSTIC VERSION)
+# 9. RUNNER CHECKPOINT ENTRYPOINT
 # ==========================================
 if __name__ == "__main__":
     logger.info("==================================================")
     logger.info("PRODUCTION SYSTEM ONLINE: RSS COMPATIBILITY LAYER")
     logger.info("==================================================")
     
-    # FORCED SYSTEM TEST: This runs once immediately on boot to verify your keys and bot
+    # 1. RUN ONCE TEST AT BOOT
     logger.info("🚀 Triggering immediate pipeline diagnostic test...")
     test_packet = {
         "company": "Tata Motors Ltd",
@@ -268,7 +241,7 @@ if __name__ == "__main__":
     }
     process_incoming_announcement(test_packet)
     
-    # Transition directly into the live public market scanning loop
+    # 2. CONTINUOUS CLEAN PIPELINE SCRIPT LOOP
     while True:
         fetch_live_market_stream()
         time.sleep(45)
