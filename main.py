@@ -23,7 +23,9 @@ GEMINI_API_KEY = os.getenv("GEMINI_API_KEY", "AQ.Ab8RN6KGEW36r2cX1-qepXdK8tqyrZo
 
 genai.configure(api_key=GEMINI_API_KEY)
 # Upgraded from flash-8b to flash for high-density, multi-page data parsing capabilities
-ai_model = genai.GenerativeModel("gemini-1.5-flash")
+ai_model = genai.GenerativeModel("models/gemini-1.5-flash") 
+# OR use the upgraded 2.5 stable model:
+# ai_model = genai.GenerativeModel("gemini-2.5-flash")
 
 # Systemic Tracking Memory cache
 SEEN_ANN_CACHE = set()
@@ -61,31 +63,39 @@ def save_cache():
 class InstitutionalSession:
     def __init__(self):
         self.session = requests.Session()
+        # Expanded production headers to closely mirror a standard browser footprint
         self.session.headers.update({
             "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.nseindia.com/"
+            "Origin": "https://www.bseindia.com",
+            "Referer": "https://www.bseindia.com/"
         })
         self.refresh_cookies()
 
     def refresh_cookies(self):
         try:
-            self.session.get("https://www.nseindia.com", timeout=10)
-            time.sleep(1)
-            self.session.get("https://www.bseindia.com", timeout=10)
+            # Hit the homepage first to accept dynamic session cookies automatically
+            self.session.get("https://www.bseindia.com", timeout=15)
+            time.sleep(2)
+            self.session.get("https://www.nseindia.com", timeout=15)
         except Exception as e:
-            logging.warning(f"[SESSION] Initial handshakes failed to register: {e}")
+            logging.warning(f"[SESSION] Initial handshakes failed to register cookies: {e}")
 
     def fetch_json(self, url: str, params: Optional[Dict] = None) -> Optional[Any]:
         try:
-            response = self.session.get(url, params=params, timeout=12)
+            response = self.session.get(url, params=params, timeout=15)
             if response.status_code == 200:
-                return response.json()
-            elif response.status_code == 401:
+                # CRITICAL: Prevent "line 1 column 1" crash by verifying content type before parsing
+                if "application/json" in response.headers.get("Content-Type", "").lower():
+                    return response.json()
+                else:
+                    logging.warning(f"[NETWORK WARNING] Received non-JSON response from {url}. Cloud firewall block suspected.")
+                    return None
+            elif response.status_code in [401, 403]:
+                logging.info("[SESSION] Session expired or flagged. Regenerating structural credentials...")
                 self.refresh_cookies()
-                response = self.session.get(url, params=params, timeout=12)
-                return response.json() if response.status_code == 200 else None
+                return None
         except Exception as e:
             logging.error(f"[NETWORK ERROR] Endpoint fetch failure ({url}): {e}")
         return None
