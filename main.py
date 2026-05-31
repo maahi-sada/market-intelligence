@@ -251,13 +251,24 @@ def fetch_backup_market_stream():
         logger.error(f"Backup tracking engine exception: {e}")
 
 # ==========================================
-# 9. RUNNER CHECKPOINT ENTRYPOINT
+# ==========================================
+# 9. RUNNER CHECKPOINT ENTRYPOINT (DIAGNOSTIC VERSION)
 # ==========================================
 if __name__ == "__main__":
     logger.info("==================================================")
-    logger.info("PRODUCTION SYSTEM ONLINE: LIVE SCANNERS ACTIVE")
+    logger.info("PRODUCTION SYSTEM ONLINE: RSS COMPATIBILITY LAYER")
     logger.info("==================================================")
     
+    # FORCED SYSTEM TEST: This runs once immediately on boot to verify your keys and bot
+    logger.info("🚀 Triggering immediate pipeline diagnostic test...")
+    test_packet = {
+        "company": "Tata Motors Ltd",
+        "headline": "Secured Electric Bus Supply Contract Valued at Over 5000 Crores",
+        "text": "Tata Motors has won a landmark tender to supply 2,500 advanced electric buses to major metropolitan transport corporations over the next 18 months."
+    }
+    process_incoming_announcement(test_packet)
+    
+    # Transition directly into the live public market scanning loop
     while True:
         fetch_live_market_stream()
         time.sleep(45)
