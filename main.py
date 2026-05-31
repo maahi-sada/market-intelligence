@@ -25,8 +25,11 @@ if not GEMINI_API_KEY:
     logger.critical("CRITICAL ERROR: GEMINI_API_KEY is missing!")
     raise ValueError("Set GEMINI_API_KEY in Railway variables.")
 
-# Initialize the official Google GenAI Client
-client = genai.Client(api_key=GEMINI_API_KEY)
+# FIX: Force http_options to use API Key directly to bypass OAuth/Vertex token errors
+client = genai.Client(
+    api_key=GEMINI_API_KEY,
+    http_options={'headers': {'X-Goog-Api-Key': GEMINI_API_KEY}}
+)
 
 # Local cache file for Railway storage memory
 SEEN_ALERTS_FILE = "processed_alerts_cache.txt"
@@ -44,7 +47,7 @@ def send_to_telegram(text_message: str):
     payload = {
         "chat_id": TELEGRAM_CHAT_ID,
         "text": text_message,
-        "parse_mode": "Markdown"  # Enables bold text formatting on Telegram
+        "parse_mode": "Markdown"
     }
     
     try:
@@ -141,10 +144,10 @@ def execute_ai_analysis(announcement_text: str) -> str:
                 contents=announcement_text,
                 config=types.GenerateContentConfig(
                     system_instruction=SYSTEM_INSTRUCTION,
-                    temperature=0.1,  # Low temperature for precise factual summaries
+                    temperature=0.1,
                 )
             )
-            time.sleep(5)  # Paid tier safety pacing buffer
+            time.sleep(5)
             return response.text
 
         except APIError as e:
