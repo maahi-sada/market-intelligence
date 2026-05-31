@@ -141,15 +141,22 @@ Subject: {subject}"""
     for attempt in range(3):
         try:
             r = model.generate_content(prompt)
-            text = r.text.strip().replace("```json", "").replace("
-```", "").strip()
-            if text.lower().startswith("null"):
+            raw_text = r.text.strip()
+            
+            # Clean up markdown blocks safely on separate lines
+            raw_text = raw_text.replace("```json", "")
+            raw_text = raw_text.replace("```", "")
+            raw_text = raw_text.strip()
+            
+            if raw_text.lower().startswith("null"):
                 return None
-            s_idx = text.find("{")
-            e_idx = text.rfind("}") + 1
+                
+            s_idx = raw_text.find("{")
+            e_idx = raw_text.rfind("}") + 1
             if s_idx >= 0 and e_idx > s_idx:
-                text = text[s_idx:e_idx]
-            return json.loads(text)
+                raw_text = raw_text[s_idx:e_idx]
+                
+            return json.loads(raw_text)
         except Exception as ex:
             if "429" in str(ex):
                 time.sleep(10 * (attempt + 1))
