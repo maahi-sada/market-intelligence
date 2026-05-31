@@ -104,7 +104,6 @@ def is_announcement_valuable(headline: str) -> bool:
     return not any(k in s for k in JUNK)
 
 # ==========================================
-# ==========================================
 # 5. AI CLASSIFICATION SYSTEM INSTRUCTION
 # ==========================================
 def classify(company, subject):
@@ -167,7 +166,6 @@ def format_alert(company, result, ann_time):
     score = result.get("score") or 0
     pulse = result.get("pulse_rating", "OK")
     
-    # Enforce precise score-based visual color rules
     if score >= 8:
         color_indicator = "🟢 *THICK GREEN*"
     elif score in [6, 7]:
@@ -179,7 +177,6 @@ def format_alert(company, result, ann_time):
     else:
         color_indicator = "🔴 *THICK RED*"
 
-    # Minimal clean dashboard header with HMbot identification
     msg = (
         f"{color_indicator} | *{category}* (Score: {score}/10)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
@@ -286,7 +283,6 @@ def check_announcements():
 def fetch_morning_macro_context():
     macro_summary = "🌍 *GLOBAL MACRO SETUP*\n"
     try:
-        # Standard processing check fallback
         macro_summary += "🔹 *GIFT Nifty Tracking:* Operating normally\n"
         macro_summary += "🛢️ *Brent Crude Benchmarks:* Active\n"
     except Exception:
@@ -326,7 +322,7 @@ def dispatch_daily_premarket_briefing():
         f"☀️ *PRE-MARKET INTELLIGENCE DESK*\n"
         f"📅 {current_date_str} | ⏰ 08:30 AM IST\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
-        f"🤖 _Alert System BY HMbot_\n"
+        f"🤖 *Alert System BY HMbot*\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n\n"
     )
     macro_block = fetch_morning_macro_context()
