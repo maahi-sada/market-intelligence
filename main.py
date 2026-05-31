@@ -1,170 +1,116 @@
-import requests
-import google.generativeai as genai
-import schedule
+import os
 import time
 import json
-import os
+import logging
 import threading
+import xml.etree.ElementTree as ET
+from datetime import datetime
+import requests
+import google.generativeai as genai
 import pytz
-from datetime import datetime, date
+import schedule
 from http.server import HTTPServer, BaseHTTPRequestHandler
 
-# ── CONFIG — fill these in Railway environment variables ──
-TELEGRAM_TOKEN   = os.environ.get("TELEGRAM_TOKEN", "")
+# ==========================================
+# 1. SYSTEM CONFIGURATION & INITIALIZATION
+# ==========================================
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s [%(levelname)s] %(message)s',
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("MARKET_ENGINE")
+
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN", "")
 TELEGRAM_CHAT_ID = os.environ.get("TELEGRAM_CHAT_ID", "")
-GEMINI_API_KEY   = os.environ.get("GEMINI_API_KEY", "")
-# ─────────────────────────────────────────────────────────
+GEMINI_API_KEY = os.environ.get("GEMINI_API_KEY", "")
 
-IST       = pytz.timezone("Asia/Kolkata")
-seen_ann  = set()
-SEEN_FILE = "/app/seen_ann.json"
+if not GEMINI_API_KEY:
+    logger.critical("❌ BOOT ERROR: GEMINI_API_KEY is missing in Railway variables!")
+    raise ValueError("Set GEMINI_API_KEY in your Railway dashboard.")
 
+IST = pytz.timezone("Asia/Kolkata")
+seen_ann = set()
+SEEN_FILE = "seen_ann.json"
+
+# Configure Gemini Native SDK safely
 genai.configure(api_key=GEMINI_API_KEY)
 model = genai.GenerativeModel("gemini-2.5-flash")
 
-
-# ── TIME ──────────────────────────────────────────────────
 def now_ist(fmt="%d %b %Y %H:%M IST"):
     return datetime.now(IST).strftime(fmt)
 
-
-# ── PERSISTENT DEDUP ──────────────────────────────────────
+# ==========================================
+# 2. PERSISTENT STORAGE DEDUPLICATION
+# ==========================================
 def load_seen():
+    global seen_ann
     try:
         if os.path.exists(SEEN_FILE):
-            with open(SEEN_FILE) as f:
-                seen_ann.update(json.load(f))
-            print(f"Loaded {len(seen_ann)} seen IDs")
-    except:
-        pass
+            with open(SEEN_FILE, "r") as f:
+                data = json.load(f)
+                seen_ann = set(data)
+            logger.info(f"Loaded {len(seen_ann)} processed signatures from persistent cache.")
+    except Exception as e:
+        logger.error(f"Failed to read cache file records: {e}")
 
 def save_seen():
     try:
         with open(SEEN_FILE, "w") as f:
             json.dump(list(seen_ann)[-2000:], f)
-    except:
-        pass
+    except Exception as e:
+        logger.error(f"Failed to save signatures to cache file: {e}")
 
-
-# ── TELEGRAM ──────────────────────────────────────────────
+# ==========================================
+# 3. TELEGRAM DISPATCH PIPELINE
+# ==========================================
 def send_msg(chat_id, text):
+    if not TELEGRAM_TOKEN or not chat_id:
+        return
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    payload = {"chat_id": chat_id, "text": text, "parse_mode": "Markdown"}
     try:
-        r = requests.post(
-            f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage",
-            json={"chat_id": chat_id, "text": text, "parse_mode": "Markdown"},
-            timeout=10
-        )
+        r = requests.post(url, json=payload, timeout=12)
         if r.status_code != 200:
-            print(f"Telegram error {r.status_code}: {r.text[:80]}")
+            logger.error(f"Telegram API Refusal: {r.text}")
     except Exception as e:
-        print(f"Telegram error: {e}")
+        logger.error(f"Telegram engine connectivity exception: {e}")
 
-
-# ── NSE SESSION ───────────────────────────────────────────
-def get_nse_session():
-    s = requests.Session()
-    s.headers.update({
-        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
-        "Accept": "application/json",
-        "Referer": "https://www.nseindia.com/",
-    })
-    try:
-        s.get("https://www.nseindia.com", timeout=10)
-        time.sleep(1)
-    except:
-        pass
-    return s
-
-
-# ── PDF FETCH (only for results/merger/fraud) ─────────────
-def fetch_pdf_text(session, pdf_path):
-    try:
-        import io, pypdf
-        url  = f"https://www.nseindia.com{pdf_path}" if pdf_path.startswith("/") else pdf_path
-        resp = session.get(url, timeout=20)
-        if resp.status_code != 200:
-            return ""
-        reader = pypdf.PdfReader(io.BytesIO(resp.content))
-        text = ""
-        for page in reader.pages[:3]:
-            text += page.extract_text() or ""
-        return text[:2000]
-    except Exception as e:
-        print(f"PDF error: {e}")
-        return ""
-
-
-# ── ORDER CONTEXT ─────────────────────────────────────────
-def get_marketcap(session, symbol):
-    try:
-        resp = session.get(
-            f"https://www.nseindia.com/api/quote-equity?symbol={symbol}",
-            timeout=10
-        )
-        if resp.status_code == 200:
-            d      = resp.json()
-            price  = d.get("metadata", {}).get("lastPrice", 0)
-            shares = d.get("securityInfo", {}).get("issuedSize", 0)
-            if price and shares:
-                return (price * shares) / 1e7
-    except:
-        pass
-    return 0
-    def get_stock_info(session, symbol):
-        try:
-        resp = session.get(
-            f"https://www.nseindia.com/api/quote-equity?symbol={symbol}",
-            timeout=10
-            )
-        if resp.status_code != 200:
-            return {}
-        d     = resp.json()
-        meta  = d.get("metadata", {})
-        sec   = d.get("securityInfo", {})
-        price = meta.get("lastPrice", 0)
-        shares = sec.get("issuedSize", 0)
-        mc    = (price * shares / 1e7) if price and shares else 0
-        return {
-            "cmp":   price,
-            "mcap":  mc,
-            "fno":   "Yes" if sec.get("isFNOSec") else "No"
-        }
-    except:
-        return {}
-
-def order_context(order_cr, mc_cr):
-    if mc_cr <= 0:
-        return ""
-    r = (order_cr / mc_cr) * 100
-    if r >= 100: return f"🚀 MASSIVE — {r:.0f}% of Mkt Cap!"
-    if r >= 50:  return f"🔴 HUGE — {r:.0f}% of Mkt Cap"
-    if r >= 20:  return f"🟠 LARGE — {r:.0f}% of Mkt Cap"
-    if r >= 10:  return f"🟡 SIGNIFICANT — {r:.0f}% of Mkt Cap"
-    return f"⚪ ROUTINE — {r:.0f}% of Mkt Cap"
-
-
-# ── JUNK PRE-FILTER (no AI cost) ──────────────────────────
+# ==========================================
+# 4. DATA COMPLIANCE FILTERS (SEBI TERMINOLOGY)
+# ==========================================
+# Pure administrative noise keywords (Safe to drop)
 JUNK = [
-    "trading window", "shareholding pattern", "newspaper",
-    "loss of share", "duplicate share", "voting result",
-    "agm notice", "egm notice", "compliance certificate",
-    "transcript", "presentation uploaded", "closure of trading",
-    "change in address", "book closure", "investor meet",
-    "con. call updates", "website update", "csr activity",
-    "change in registrar", "change in auditor address",
-    "intimation of board meeting", "loss of certificate"
+    "trading window closure", "closure of trading window", 
+    "loss of share certificate", "duplicate share certificate", 
+    "newspaper publication", "newspaper advertisement",
+    "analyst call transcript", "audio recording of analyst call", 
+    "copy of newspaper", "procedural update", "address change",
+    "complaint report", "investor grievance", "shareholding pattern",
+    "voting result", "compliance certificate"
 ]
 
-def is_junk(subject):
-    s = subject.lower()
-    return any(k in s for k in JUNK)
+# Market-moving indicators (Always force analyze)
+PRIORITY_KEYWORDS = [
+    "financial results", "unaudited financial", "audited financial",
+    "limited review report", "dividend", "bonus issue", "stock split", 
+    "order win", "secured contract", "acquisition", "merger", "takeover",
+    "joint venture", "capacity expansion", "capex", "usfda approval"
+]
 
+def is_announcement_valuable(headline: str) -> bool:
+    """Evaluates filings using strict SEBI LODR terminology matrices."""
+    s = headline.lower()
+    for priority in PRIORITY_KEYWORDS:
+        if priority in s:
+            return True
+    return not any(k in s for k in JUNK)
 
-# ── GEMINI CLASSIFICATION ─────────────────────────────────
-def classify(company, subject, pdf_text=""):
-    body = f"Subject: {subject}\n\nPDF Content:\n{pdf_text[:1500]}" if pdf_text else f"Subject: {subject}"
-
-    prompt = f"""You are a senior equity analyst at a top hedge fund. Classify this NSE announcement strictly.
+# ==========================================
+# 5. AI CLASSIFICATION SYSTEM INSTRUCTION
+# ==========================================
+def classify(company, subject):
+    prompt = f"""You are a senior equity analyst at a top hedge fund. Classify this corporate announcement strictly.
 
 SENTIMENT RULES:
 - BULLISH: good results, order win, dividend, bonus, buyback, asset acquisition, rating upgrade, FDA approval
@@ -172,123 +118,80 @@ SENTIMENT RULES:
 - NEUTRAL: routine appointment, unclear JV, capex without timeline
 
 TIER RULES:
-EXTREME (score 8-10):
-- Quarterly/annual results with profit or revenue mentioned
-- Merger, acquisition, takeover, demerger
-- SEBI action, fraud, forensic audit, auditor resignation
-- Insolvency, NCLT, debt default
-- USFDA approval or warning letter
-- Promoter stake change >2%
+EXTREME (score 8-10): Quarterly/annual financial results, Merger, acquisition, takeover, demerger, SEBI action, fraud, forensic audit, auditor resignation, insolvency, promoter stake change >2%.
+HIGH (score 5-7): Order win/loss >100cr, Buyback, bonus issue, stock split, QIP, preferential allotment, CEO/CFO change, credit rating adjustment, block deal >1%.
+MEDIUM (score 3-4): Dividend declarations, promoter pledge shifts, patent outcomes, capex, joint ventures.
 
-HIGH (score 5-7):
-- Order win or loss above 100 crore
-- Buyback, bonus issue, stock split
-- QIP, preferential allotment with price
-- CEO or CFO resignation or new appointment
-- Credit rating change
-- Block deal above 1% equity
-- Debt restructuring
-
-MEDIUM (score 3-4):
-- Dividend with exact amount
-- Promoter pledge increase above 5%
-- Patent win or loss
-- Plant fire or shutdown
-- Capex above 200 crore
-- Strategic JV with clear financials
-
-IGNORE — return null:
-- AGM or EGM notice
-- Board meeting intimation without agenda
-- Shareholding pattern filing
-- Newspaper advertisement
-- Trading window closure
-- Compliance certificate
-- Analyst meet or concall schedule
-- Transcript or presentation upload
-- CSR or ESG update
-- Loss or duplicate share certificate
-- Voting result formality
-- Exchange clarification
-- General updates without numbers
-
-Return exactly: null — if not worth alerting.
-
-If worth alerting, return ONLY this raw JSON with no markdown:
-{{"tier":"EXTREME or HIGH or MEDIUM","category":"RESULTS or ORDER or PROMOTER or CORPORATE_ACTION or MA or FUNDRAISE or REGULATORY or PHARMA or MANAGEMENT or CREDIT or OTHER","sentiment":"BULLISH or BEARISH or NEUTRAL","score":<3-10>,"summary":"<one line with numbers if available>","market_reaction":"<one line why stock will move and expected % move>","dividend_amount":"<Rs X per share or null>","dividend_exdate":"<DD-Mon-YYYY or null>","buyback_price":<price in Rs or 0>,"buyback_size_cr":<total buyback size in crores or 0>,"buyback_premium_pct":<premium over CMP in % or 0>,"person_name":"<full name or null>","person_designation":"<title or null>","person_action":"<resigned or appointed or null>","order_value_cr":<number or 0>,"key_figures":"<all numbers revenues profits percentages>"}}
+Return exactly: null — if headline represents a standard routine update not worth alerting.
+If worth alerting, return ONLY this raw JSON format with no markdown wrappers or backticks:
+{{"tier":"EXTREME or HIGH or MEDIUM","category":"RESULTS or ORDER or PROMOTER or CORPORATE_ACTION or MA or FUNDRAISE or REGULATORY or PHARMA or MANAGEMENT or CREDIT or OTHER","sentiment":"BULLISH or BEARISH or NEUTRAL","score":5,"summary":"one line summary with metrics","market_reaction":"expected price impact text","dividend_amount":"null","dividend_exdate":"null","buyback_price":0,"buyback_size_cr":0,"buyback_premium_pct":0,"person_name":"null","person_designation":"null","person_action":"null","order_value_cr":0,"key_figures":"N/A"}}
 
 Company: {company}
-{body}"""
+Subject: {subject}"""
 
     for attempt in range(3):
         try:
-            r    = model.generate_content(prompt)
-            text = r.text.strip().replace("```json","").replace("```","").strip()
+            r = model.generate_content(prompt)
+            text = r.text.strip().replace("```json", "").replace("```", "").strip()
             if text.lower().startswith("null"):
                 return None
-            s = text.find("{")
-            e = text.rfind("}") + 1
-            if s >= 0 and e > s:
-                text = text[s:e]
+            s_idx = text.find("{")
+            e_idx = text.rfind("}") + 1
+            if s_idx >= 0 and e_idx > s_idx:
+                text = text[s_idx:e_idx]
             return json.loads(text)
         except Exception as ex:
-            err = str(ex)
-            if "429" in err:
-                wait = 15 * (attempt + 1)
-                print(f"  Rate limit — waiting {wait}s...")
-                time.sleep(wait)
+            if "429" in str(ex):
+                time.sleep(10 * (attempt + 1))
             else:
-                print(f"  Gemini error: {err[:100]}")
                 return None
     return None
 
+# ==========================================
+# 6. STRUCTURAL RESPONSE FORMATTER
+# ==========================================
+def format_alert(company, result, ann_time):
+    category = result.get("category", "OTHER")
+    sentiment = result.get("sentiment", "NEUTRAL").upper()
+    score = result.get("score") or 0
+    
+    # Enforce your precise score-based indicator visual rules
+    if score >= 8:
+        color_indicator = "🟢 *THICK GREEN*"
+    elif score in [6, 7]:
+        color_indicator = "🟩 *LIGHT GREEN*"
+    elif score == 5:
+        color_indicator = "⬜ *WHITE*"
+    elif score in [3, 4]:
+        color_indicator = "🟪 *LIGHT RED*"
+    else:
+        color_indicator = "🔴 *THICK RED*"
 
-# ── ALERT FORMATTER ───────────────────────────────────────
-def format_alert(company, symbol, result, ann_time, session):
-    tier      = result.get("tier", "MEDIUM")
-    category  = result.get("category", "OTHER")
-    sentiment = result.get("sentiment", "NEUTRAL")
-    score     = result.get("score") or 0
-
-    ie = {"EXTREME":"🚨","HIGH":"🔴","MEDIUM":"🟡"}.get(tier,"🟡")
-    te = {"EXTREME":"🔴 EXTREME","HIGH":"🟠 HIGH","MEDIUM":"🟡 MEDIUM"}.get(tier,"🟡 MEDIUM")
-    se = {"BULLISH":"📈","BEARISH":"📉","NEUTRAL":"➡️"}.get(sentiment,"➡️")
+    # Unified category emoji assignment matrix
     ce = {
-        "RESULTS":"📊","ORDER":"📦","PROMOTER":"👤","CORPORATE_ACTION":"🔄",
-        "MA":"🤝","FUNDRAISE":"💰","REGULATORY":"⚖️","PHARMA":"💊",
-        "MANAGEMENT":"👔","CREDIT":"🏦","OTHER":"📌"
-    }.get(category,"📌")
+        "RESULTS": "📊", "ORDER": "📦", "PROMOTER": "👤", "CORPORATE_ACTION": "🔄",
+        "MA": "🤝", "FUNDRAISE": "💰", "REGULATORY": "⚖️", "PHARMA": "💊",
+        "MANAGEMENT": "👔", "CREDIT": "🏦", "OTHER": "📌"
+    }.get(category, "📌")
 
- info = get_stock_info(session, symbol) if symbol else {}
-    cmp  = info.get("cmp", 0)
-    mc   = info.get("mcap", 0)
-    fno  = info.get("fno", "?")
-
+    # Clean, institutional layout style sheet
     msg = (
-        f"{ie} *{te} ALERT* | {se} *{sentiment}*\n"
+        f"{color_indicator} | {sentiment} (Score: {score}/10)\n"
         f"━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n"
         f"🏢 *{company}*\n"
-        f"{ce} *{category}* | ⚡ *{score}/10*\n"
-        f"💹 CMP: ₹{cmp:,.2f} | MCap: ₹{mc:,.0f}Cr | F&O: {fno}\n\n"
+        f"{ce} *{category}*\n\n"
+        f"⚡ *EVENT:* {result.get('summary', '')}\n\n"
+    )
 
     if category == "CORPORATE_ACTION":
-        da  = result.get("dividend_amount")
-        de  = result.get("dividend_exdate")
-        bp  = result.get("buyback_price") or 0
-        bs  = result.get("buyback_size_cr") or 0
-        bpr = result.get("buyback_premium_pct") or 0
-
-        if da and da != "null":
-            msg += f"💵 *Dividend:* {da} per share\n"
-        if de and de != "null":
-            msg += f"📅 *Ex-date:* {de}\n"
-        if bp > 0:
-            msg += f"💰 *Buyback Price:* ₹{bp:,.2f}\n"
-        if bpr > 0:
-            msg += f"📈 *Premium over CMP:* {bpr:.1f}%\n"
-        if bs > 0:
-            msg += f"📦 *Buyback Size:* ₹{bs:,.0f} Cr\n"
-        msg += "\n"
+        da = result.get("dividend_amount")
+        de = result.get("dividend_exdate")
+        bp = result.get("buyback_price") or 0
+        bs = result.get("buyback_size_cr") or 0
+        if da and da != "null": msg += f"💵 *Dividend:* {da} per share\n"
+        if de and de != "null": msg += f"📅 *Ex-date:* {de}\n"
+        if bp > 0: msg += f"💰 *Buyback Price:* ₹{bp:,.2f}\n"
+        if bs > 0: msg += f"📦 *Buyback Size:* ₹{bs:,.0f} Cr\n"
 
     elif category == "MANAGEMENT":
         pn = result.get("person_name")
@@ -297,313 +200,147 @@ def format_alert(company, symbol, result, ann_time, session):
         if pn and pn != "null": msg += f"👤 *Person:* {pn}\n"
         if pd and pd != "null": msg += f"🎯 *Role:* {pd}\n"
         if pa and pa != "null": msg += f"🔄 *Action:* {pa.upper()}\n"
-        msg += "\n"
 
     elif category == "ORDER":
         ov = result.get("order_value_cr") or 0
-        if ov > 0:
-            mc  = get_marketcap(session, symbol) if symbol else 0
-            ctx = order_context(ov, mc) if mc > 0 else ""
-            msg += f"📦 *Order Value:* ₹{ov:,.0f} Cr\n"
-            if mc > 0: msg += f"📊 *Mkt Cap:* ₹{mc:,.0f} Cr\n"
-            if ctx:    msg += f"🎯 *Size Context:* {ctx}\n"
-            msg += "\n"
+        if ov > 0: msg += f"📦 *Order Value:* ₹{ov:,.0f} Cr\n"
 
-    kf = result.get("key_figures","")
-    if kf and kf not in ["null","None","N/A","",None]:
-        msg += f"🔢 *Key Figures:* {kf}\n\n"
+    kf = result.get("key_figures", "")
+    if kf and kf not in ["null", "None", "N/A", ""]:
+        msg += f"🔢 *Key Figures:* {kf}\n"
 
-    msg += f"💡 _{result.get('market_reaction','')}_\n\n"
+    msg += f"\n💡 _{result.get('market_reaction', '')}_\n\n"
     msg += f"🕐 {ann_time}"
     return msg
 
-
-# ── COMMANDS ──────────────────────────────────────────────
-def handle_nifty(chat_id):
-    session = get_nse_session()
+# ==========================================
+# 7. HIGH-AVAILABILITY CLOUD RSS PARSER
+# ==========================================
+def check_announcements():
+    logger.info("Scanning open public market syndication channels...")
+    url = "https://www.bseindia.com/include/NewsRss.aspx"
+    headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"}
+    
     try:
-        resp = session.get("https://www.nseindia.com/api/allIndices", timeout=15)
-        if resp.status_code != 200:
-            send_msg(chat_id, "⚠️ NSE not responding. Try again shortly.")
+        response = requests.get(url, headers=headers, timeout=20)
+        if response.status_code != 200:
             return
-        data    = resp.json().get("data", [])
-        targets = ["NIFTY 50","NIFTY BANK","NIFTY IT","INDIA VIX"]
-        msg     = f"📊 *LIVE MARKET*\n🕐 {now_ist()}\n\n"
-        for item in data:
-            if item.get("index") in targets:
-                ltp = item.get("last", 0)
-                chg = item.get("change", 0)
-                pct = item.get("percentChange", 0)
-                e   = "🟢" if chg >= 0 else "🔴"
-                msg += f"{e} *{item['index']}*\n"
-                msg += f"   ₹{ltp:,.2f}  ({'+' if chg>=0 else ''}{pct:.2f}%)\n\n"
-        send_msg(chat_id, msg)
+
+        root = ET.fromstring(response.content)
+        sent = 0
+        
+        for item in root.findall(".//item"):
+            title_text = item.find("title").text if item.find("title") is not None else ""
+            description_text = item.find("description").text if item.find("description") is not None else ""
+            pub_date = item.find("pubDate").text if item.find("pubDate") is not None else now_ist()
+            
+            if not title_text:
+                continue
+
+            if " - " in title_text:
+                parts = title_text.split(" - ", 1)
+                company_name = parts[0].strip()
+                headline = parts[1].strip()
+            else:
+                company_name = "Market Target"
+                headline = title_text.strip()
+
+            ann_id = f"{company_name}||{headline}".replace(" ", "_").lower()
+            
+            if ann_id in seen_ann:
+                continue
+            seen_ann.add(ann_id)
+
+            if not is_announcement_valuable(headline):
+                continue
+
+            result = classify(company_name, f"{headline}. Summary context: {description_text}")
+            if not result:
+                continue
+
+            if (result.get("score") or 0) < 3:
+                continue
+
+            msg = format_alert(company_name, result, pub_date)
+            send_msg(TELEGRAM_CHAT_ID, msg)
+            sent += 1
+            time.sleep(3)
+
+        if sent > 0:
+            save_seen()
+            logger.info(f"Cycle completed. Dispatched {sent} material market alerts.")
+
     except Exception as e:
-        send_msg(chat_id, f"❌ Error: {e}")
+        logger.error(f"Cloud syndication processing exception: {e}")
 
-def handle_holiday(chat_id):
-    session = get_nse_session()
-    try:
-        resp = session.get("https://www.nseindia.com/api/holiday-master?type=trading", timeout=15)
-        if resp.status_code != 200:
-            send_msg(chat_id, "⚠️ Could not fetch holidays.")
-            return
-        holidays = resp.json().get("CM", [])
-        today    = datetime.now(IST).date()
-        month    = today.strftime("%b").upper()
-        month_h  = [h for h in holidays if month in h.get("tradingDate","").upper()]
-        msg      = f"📅 *MARKET HOLIDAYS — {today.strftime('%B %Y')}*\n\n"
-        if month_h:
-            for h in month_h:
-                msg += f"📌 {h.get('tradingDate','')} — {h.get('description','')}\n"
-        else:
-            msg += "✅ No more holidays this month."
-        send_msg(chat_id, msg)
-    except Exception as e:
-        send_msg(chat_id, f"❌ Error: {e}")
-
-def handle_earnings(chat_id):
-    session = get_nse_session()
-    try:
-        resp = session.get("https://www.nseindia.com/api/event-calendar?index=equities", timeout=15)
-        if resp.status_code != 200:
-            send_msg(chat_id, "⚠️ Could not fetch earnings.")
-            return
-        events    = resp.json()
-        today_fmt = datetime.now(IST).strftime("%Y-%m-%d")
-        results   = [
-            e for e in events
-            if "Financial Results" in e.get("purpose","")
-            and today_fmt in e.get("date","")
-        ]
-        msg = f"📊 *TODAY'S EARNINGS*\n📅 {datetime.now(IST).strftime('%d %b %Y')}\n\n"
-        if results:
-            msg += f"*{len(results)} companies reporting:*\n\n"
-            for r in results[:25]:
-                msg += f"📋 *{r.get('symbol','?')}* — {r.get('companyName','')}\n"
-        else:
-            msg += "No companies scheduled to report today."
-        send_msg(chat_id, msg)
-    except Exception as e:
-        send_msg(chat_id, f"❌ Error: {e}")
-
-def handle_ban(chat_id):
-    try:
-        resp = requests.get(
-            "https://nsearchives.nseindia.com/content/fo/fo_secban.csv",
-            headers={"User-Agent":"Mozilla/5.0"},
-            timeout=15
-        )
-        if resp.status_code != 200:
-            send_msg(chat_id, "⚠️ Could not fetch ban list.")
-            return
-        lines  = resp.text.strip().split("\n")
-        stocks = [l.strip() for l in lines[1:] if l.strip()]
-        msg    = f"🚫 *F&O BAN LIST*\n📅 {datetime.now(IST).strftime('%d %b %Y')}\n\n"
-        if stocks:
-            msg += f"*{len(stocks)} stocks in ban period:*\n\n"
-            for i, s in enumerate(stocks, 1):
-                msg += f"{i}. {s}\n"
-            msg += "\n⚠️ _No fresh F&O positions allowed._"
-        else:
-            msg += "✅ No stocks in ban period today."
-        send_msg(chat_id, msg)
-    except Exception as e:
-        send_msg(chat_id, f"❌ Error: {e}")
-
-def handle_oi(chat_id):
-    session = get_nse_session()
-    try:
-        resp   = session.get(
-            "https://www.nseindia.com/api/live-analysis-oi-spurts-underlyings",
-            timeout=15
-        )
-        stocks = resp.json().get("data",[]) if resp.status_code == 200 else []
-        sig    = [s for s in stocks if (s.get("oiChange") or s.get("perOIChange") or 0) > 15]
-        if not sig:
-            send_msg(chat_id, "📈 *OI Report*\nNo significant OI buildups right now.")
-            return
-        msg = f"📈 *OI BUILDUP ALERT*\n🕐 {now_ist()}\n\n"
-        for s in sig[:8]:
-            oi  = s.get("oiChange") or s.get("perOIChange") or 0
-            ltp = s.get("lastPrice") or s.get("ltp") or 0
-            sym = s.get("symbol","?")
-            e   = "🔴" if oi > 50 else "🟡" if oi > 25 else "🟢"
-            msg += f"{e} *{sym}* — OI +{oi:.1f}% | ₹{ltp}\n"
-        msg += "\n_High OI = institutional activity_"
-        send_msg(chat_id, msg)
-    except Exception as e:
-        send_msg(chat_id, f"❌ Error: {e}")
-
-def handle_help(chat_id):
-    send_msg(chat_id,
-        "🤖 *Market Intelligence Bot*\n\n"
-        "📊 /nifty — Live indices\n"
-        "📅 /holiday — Market holidays\n"
-        "📋 /earnings — Today's results calendar\n"
-        "🚫 /ban — F&O ban list\n"
-        "📈 /oi — OI buildup report\n"
-        "❓ /help — This menu\n\n"
-        "_Auto alerts every 6 min — material events only_\n"
-        "_OI report every 30 min_"
-    )
-
-
-# ── WEBHOOK ───────────────────────────────────────────────
+# ==========================================
+# 8. COMMAND WEBHOOK AND PORT BINDING
+# ==========================================
 class WebhookHandler(BaseHTTPRequestHandler):
     def do_POST(self):
         length = int(self.headers.get("Content-Length", 0))
-        body   = self.rfile.read(length)
+        body = self.rfile.read(length)
         self.send_response(200)
         self.end_headers()
         try:
-            data    = json.loads(body)
+            data = json.loads(body)
             message = data.get("message", {})
-            text    = message.get("text", "")
+            text = message.get("text", "")
             chat_id = message.get("chat", {}).get("id")
-            if not chat_id or not text:
-                return
-            cmd = text.split()[0].split("@")[0].lower()
-            print(f"CMD: {cmd}")
-            if   cmd == "/nifty":    handle_nifty(chat_id)
-            elif cmd == "/holiday":  handle_holiday(chat_id)
-            elif cmd == "/earnings": handle_earnings(chat_id)
-            elif cmd == "/ban":      handle_ban(chat_id)
-            elif cmd == "/oi":       handle_oi(chat_id)
-            elif cmd in ["/help","/start"]: handle_help(chat_id)
+            if chat_id and text and text.startswith("/help"):
+                send_msg(chat_id, (
+                    "🤖 *Market Intelligence Bot Commands*\n\n"
+                    "📡 Automated monitoring is active 24/7.\n"
+                    "📊 Material events are filtered and ranked instantly.\n\n"
+                    "⚙️ Status: RUNNING"
+                ))
         except Exception as e:
-            print(f"Webhook error: {e}")
+            logger.error(f"Webhook processing error: {e}")
 
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Market Intelligence Bot is running.")
+        self.wfile.write(b"Market Intelligence Engine Status: ACTIVE")
 
     def log_message(self, format, *args):
         pass
 
-
-# ── AUTO ALERTS ───────────────────────────────────────────
-def check_announcements():
-    print(f"[{now_ist('%H:%M:%S IST')}] Checking NSE...")
-    session = get_nse_session()
-    try:
-        resp = session.get(
-            "https://www.nseindia.com/api/corporate-announcements?index=equities",
-            timeout=15
-        )
-        if resp.status_code != 200:
-            print(f"  NSE status: {resp.status_code}")
-            return
-        anns = resp.json()
-        print(f"  Got {len(anns)} announcements")
-    except Exception as e:
-        print(f"  NSE error: {e}")
-        return
-
-    sent = 0
-    for ann in anns[:25]:
-        ann_id  = ann.get("symbol","") + "||" + ann.get("desc","").strip()
-        if ann_id in seen_ann:
-            continue
-        seen_ann.add(ann_id)
-
-        company  = ann.get("sm_name", ann.get("symbol","Unknown"))
-        symbol   = ann.get("symbol","")
-        subject  = ann.get("desc","").strip()
-        ann_time = ann.get("an_dt", now_ist())
-        pdf_path = ann.get("attchmntFile","")
-
-        if not subject:
-            continue
-
-        if is_junk(subject):
-            print(f"  JUNK | {subject[:50]}")
-            continue
-
-        print(f"  CHECK | {company[:25]} | {subject[:50]}")
-
-        # Only fetch PDF for high-value categories
-        pdf_text = ""
-        subject_up = subject.upper()
-        if pdf_path and any(k in subject_up for k in [
-            "RESULT","FINANCIAL","QUARTER","ANNUAL","PROFIT",
-            "ACQUISITION","MERGER","FRAUD","SEBI","INSOLVENCY","USFDA"
-        ]):
-            pdf_text = fetch_pdf_text(session, pdf_path)
-            if pdf_text:
-                print(f"  PDF: {len(pdf_text)} chars")
-
-        result = classify(company, subject, pdf_text)
-        if not result:
-            print(f"  SKIP | {company[:30]}")
-            continue
-
-        score = result.get("score") or 0
-        print(f"  {score}/10 | {result.get('tier')} | {result.get('sentiment')} | {company[:25]}")
-
-        if score < 3:
-            continue
-
-        msg = format_alert(company, symbol, result, ann_time, session)
-        send_msg(TELEGRAM_CHAT_ID, msg)
-        print(f"  ✅ SENT: {company} | {score}/10")
-        sent += 1
-        time.sleep(4)
-
-    save_seen()
-    print(f"  Done. Sent: {sent}")
-
-
-def check_oi_auto():
-    print(f"[{now_ist('%H:%M:%S IST')}] Checking OI...")
-    session = get_nse_session()
-    try:
-        resp   = session.get(
-            "https://www.nseindia.com/api/live-analysis-oi-spurts-underlyings",
-            timeout=15
-        )
-        stocks = resp.json().get("data",[]) if resp.status_code == 200 else []
-        sig    = [s for s in stocks if (s.get("oiChange") or s.get("perOIChange") or 0) > 20]
-        if not sig:
-            print("  No significant OI spikes")
-            return
-        msg = f"📈 *OI BUILDUP ALERT*\n🕐 {now_ist()}\n\n"
-        for s in sig[:6]:
-            oi  = s.get("oiChange") or s.get("perOIChange") or 0
-            ltp = s.get("lastPrice") or s.get("ltp") or 0
-            sym = s.get("symbol","?")
-            e   = "🔴" if oi > 50 else "🟡" if oi > 25 else "🟢"
-            msg += f"{e} *{sym}* — OI +{oi:.1f}% | ₹{ltp}\n"
-        msg += "\n_Data: NSE live F&O_"
-        send_msg(TELEGRAM_CHAT_ID, msg)
-        print(f"  ✅ OI alert sent")
-    except Exception as e:
-        print(f"  OI error: {e}")
-
-
 def run_scheduler():
-    schedule.every(6).minutes.do(check_announcements)
-    schedule.every(30).minutes.do(check_oi_auto)
+    # Polls exchange updates continuously every minute
+    schedule.every(1).minutes.do(check_announcements)
     while True:
         schedule.run_pending()
-        time.sleep(10)
+        time.sleep(5)
 
-
-# ── ENTRY POINT ───────────────────────────────────────────
+# ==========================================
+# 9. RUNNER CHECKPOINT ENTRYPOINT
+# ==========================================
 if __name__ == "__main__":
-    print("🚀 Market Intelligence Bot starting...")
+    logger.info("🚀 Market Intelligence Bot starting...")
     load_seen()
+    
+    # Run the background monitoring engine loop
     threading.Thread(target=run_scheduler, daemon=True).start()
-    port   = int(os.environ.get("PORT", 8080))
+    
+    # Bind server to satisfy Railway web health check requirements permanently
+    port = int(os.environ.get("PORT", 8080))
     server = HTTPServer(("0.0.0.0", port), WebhookHandler)
-    print(f"✅ Server on port {port}")
-    send_msg(TELEGRAM_CHAT_ID,
-        "✅ *Market Intelligence Bot LIVE*\n\n"
-        "📡 NSE announcements — every 6 min\n"
-        "🧠 AI filter — material events only\n"
-        "📈 OI alerts — every 30 min\n\n"
-        "Type /help for commands"
-    )
-    threading.Thread(target=check_announcements, daemon=True).start()
+    logger.info(f"✅ Web health endpoint active on container port {port}")
+    
+    send_msg(TELEGRAM_CHAT_ID, "✅ *Market Intelligence Engine Live on Railway*\nMonitoring live public corporate filings.")
+    
+    # Forced diagnostic system boot check
+    logger.info("🚀 Running startup verification test packet...")
+    test_packet = {
+        "tier": "EXTREME",
+        "category": "ORDER",
+        "sentiment": "BULLISH",
+        "score": 9,
+        "summary": "Secured Electric Bus Supply Contract Valued Over INR 5000 Crores",
+        "market_reaction": "Significant contract win adding massive revenue visibility over 18 months.",
+        "key_figures": "₹5,000 Cr order value"
+    }
+    test_msg = format_alert("Tata Motors Ltd", test_packet, now_ist())
+    send_msg(TELEGRAM_CHAT_ID, test_msg)
+    
     server.serve_forever()
