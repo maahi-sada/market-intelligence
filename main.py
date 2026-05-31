@@ -20,7 +20,7 @@ seen_ann  = set()
 SEEN_FILE = "/app/seen_ann.json"
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash")
+model = genai.GenerativeModel("gemini-1.5-flash")
 
 
 # ── TIME ──────────────────────────────────────────────────
