@@ -9,8 +9,12 @@ import feedparser
 import google.generativeai as genai
 import pytz
 import schedule
+import warnings
 from datetime import datetime, date
 from http.server import HTTPServer, BaseHTTPRequestHandler
+
+# Suppress cryptography / pypdf deprecation warnings from cluttering logs
+warnings.filterwarnings("ignore", message=".*ARC4.*")
 
 # ==========================================
 # CONFIGURATION
@@ -476,7 +480,7 @@ def cmd_holiday(chat_id):
 def cmd_earnings(chat_id):
     session = get_nse_session()
     try:
-        resp = session.get("https://www.nseindia.com/api/event-calendar?index=equities", timeout=15)
+        resp = session.get("https://www.nseindia.com/api/event-calendar?index=equ equities", timeout=15)
         if resp.status_code != 200:
             send_msg(chat_id, "⚠️ Could not fetch earnings.")
             return
@@ -595,7 +599,7 @@ def check_announcements():
     save_seen()
 
 # ==========================================
-# FEATURE 1: BSE FILINGS MONITOR
+# FEATURE 1: BSE FILINGS MONITOR (FIXED STRUCT)
 # ==========================================
 def check_bse_announcements():
     logger.info("Checking BSE filings...")
@@ -604,7 +608,15 @@ def check_bse_announcements():
         url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pGroup=A&pScripCode=&pSearchTerm="
         resp = session.get(url, timeout=15)
         if resp.status_code != 200: return
-        anns = resp.json()
+        
+        raw_data = resp.json()
+        if isinstance(raw_data, dict):
+            anns = raw_data.get("Table", raw_data.get("Table1", []))
+        elif isinstance(raw_data, list):
+            anns = raw_data
+        else:
+            return
+            
     except Exception as e:
         logger.error(f"BSE API error: {e}")
         return
