@@ -34,7 +34,7 @@ seen_ann  = set()
 SEEN_FILE = "seen_ann.json"
 
 genai.configure(api_key=GEMINI_API_KEY)
-model = genai.GenerativeModel("gemini-2.0-flash")
+model = genai.GenerativeModel("gemini-2.5-flash-preview-05-14")
 
 def now_ist(fmt="%d %b %Y %H:%M IST"):
     return datetime.now(IST).strftime(fmt)
