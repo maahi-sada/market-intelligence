@@ -159,7 +159,8 @@ JUNK = [
     "con. call updates", "website update", "csr activity",
     "change in registrar", "intimation of board meeting",
     "loss of certificate", "change in auditor address",
-    "analysts/institutional investor meet"
+    "analysts/institutional investor meet",
+    "investor presentation", "credit rating", "outcome of board"
 ]
 
 def is_junk(subject):
