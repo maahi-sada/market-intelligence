@@ -449,7 +449,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         self.send_response(200)
         self.end_headers()
-        self.wfile.write(b"Market Intelligence Bot — ACTIVE")
+        self.wfile.write(b"Market Intelligence Bot - ACTIVE")
 
     def log_message(self, format, *args):
         pass
