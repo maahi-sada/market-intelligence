@@ -1,22 +1,3 @@
-This is an impressive institutional-grade architecture you have built. To answer your question directly: **Yes, it is entirely possible to add these features without changing the core mechanics or breaking your current code.** Because your code relies on an elegant, modular pipeline (`Fetch Data` $\rightarrow$ `Deduplicate` $\rightarrow$ `Gemini AI Classify` $\rightarrow$ `Format` $\rightarrow$ `Send`), we can implement your priority list by simply adding **independent worker threads, dedicated helper functions, and state sets** right alongside your existing ones.
-
-To keep things perfectly stable, clean, and directly functional, here is the complete code containing your requested **Priority 1, 2, 3, 4, and 5 integrations** completely mapped into your engine framework.
-
----
-
-### Key Additions Implemented:
-
-* **BSE Corporate Announcements Tracker:** Hits the live BSE API endpoint using custom user-agents, tracking corporate disclosures natively alongside NSE.
-* **Bulk & Block Deal Monitor:** Scans the daily institutional heavy-hitter movements on NSE.
-* **Insider Trading (PIT/SAST) Scanner:** Tracks direct promoter accumulation or dumping via the official NSE PIT API.
-* **Live Price Action Trackers (52-Week High & Circuits):** Dynamically filters daily equity data to catch accumulation breakouts and sudden liquidity locks.
-* **Seamless State Separation:** Isolated deduplication files (`seen_bse.json`, `seen_deals.json`, etc.) to prevent database crosstalk.
-
----
-
-### Updated Code Integration (`main.py`)
-
-```python
 import os
 import io
 import time
@@ -562,7 +543,7 @@ class WebhookHandler(BaseHTTPRequestHandler):
         self.send_response(200)
         self.end_headers()
         try:
-            data    = json.loads(body)
+            data = json.loads(body)
             message = data.get("message", {})
             text    = message.get("text", "")
             chat_id = message.get("chat", {}).get("id")
@@ -604,7 +585,7 @@ def check_announcements():
         if not subject or not should_process(subject): continue
 
         pdf_text = fetch_pdf_text(session, pdf_path) if pdf_path else ""
-        result = classify_announcement(company, subject, pdf_text)
+        result = classify_announcement(company, symbol, pdf_text)
         if not result or (result.get("score") or 0) < 70: continue
 
         msg = format_alert(company, symbol, result, ann_time, session, source="NSE")
@@ -620,7 +601,6 @@ def check_bse_announcements():
     logger.info("Checking BSE filings...")
     session = get_bse_session()
     try:
-        # Secure official back-end sub-category mapping endpoint
         url = "https://api.bseindia.com/BseIndiaAPI/api/AnnSubCategoryGetData/w?pGroup=A&pScripCode=&pSearchTerm="
         resp = session.get(url, timeout=15)
         if resp.status_code != 200: return
@@ -630,7 +610,6 @@ def check_bse_announcements():
         return
 
     sent = 0
-    # Process updates safely from the feed
     for ann in anns[:30]:
         news_id = str(ann.get("NEWSID", ""))
         if not news_id or news_id in seen_bse: continue
@@ -670,7 +649,6 @@ def check_nse_deals():
             deals = resp.json().get("data", [])
             
             for d in deals[:15]:
-                # Unique identifier string combination
                 deal_id = f"{d.get('symbol')}||{d.get('tradeTime')}||{d.get('quantity')}||{d.get('buySell')}"
                 if deal_id in seen_deals: continue
                 seen_deals.add(deal_id)
@@ -679,7 +657,6 @@ def check_nse_deals():
                 price = float(str(d.get('value', 0)).replace(',', ''))
                 total_cr = (qty * price) / 1e7
 
-                # Only alert on high-net-worth dynamic flows (> 10 Crore)
                 if total_cr < 10.0: continue
 
                 side_emoji = "🟢 BUY" if d.get('buySell') == 'BUY' else "🔴 SELL"
@@ -715,11 +692,10 @@ def check_insider_trading():
             seen_insider.add(pid)
 
             txn_type = item.get('tpOfTxn', '').upper()
-            # Intercept actionable market acquisitions or disposals
             if "ACQUISITION" in txn_type or "DISPOSAL" in txn_type:
                 val = float(item.get('secVal', 0) or 0)
                 val_cr = val / 1e7
-                if val_cr < 1.0: continue # Focus strictly on >= 1 Crore institutional moves
+                if val_cr < 1.0: continue
                 
                 emoji = "🚀 PROMOTER BUY" if "ACQUISITION" in txn_type else "⚠️ PROMOTER SELL"
                 msg = (
@@ -773,11 +749,10 @@ def check_price_action():
             stocks = resp.json().get("data", [])
             for s in stocks:
                 sym = s.get("symbol")
-                # Structural fallback properties mapping
                 ltp = float(s.get("lastPrice", 0))
                 p_chg = float(s.get("pChange", 0))
 
-                if abs(p_chg) >= 4.95: # Captures 5%, 10%, 20% classic circuit locks
+                if abs(p_chg) >= 4.95:
                     cid = f"{sym}||CIRCUIT||{p_chg}||{date.today()}"
                     if cid in seen_breakouts: continue
                     seen_breakouts.add(cid)
@@ -919,9 +894,6 @@ if __name__ == "__main__":
     
     send_msg(TELEGRAM_CHAT_ID, "✅ *Market Intelligence Bot LIVE with Priorities 1-5 Integrated!*")
     
-    # Warmup initialization hooks
     threading.Thread(target=check_announcements, daemon=True).start()
     threading.Thread(target=check_bse_announcements, daemon=True).start()
     server.serve_forever()
-
-```
