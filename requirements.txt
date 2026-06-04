@@ -1,6 +1,7 @@
-requests==2.31.0
-google-generativeai==0.7.0
-schedule==1.2.1
-pytz==2024.1
-pypdf==4.2.0
-feedparser
+feedparser>=6.0.11
+google-generativeai>=0.8.5
+pypdf>=5.0.0
+pytz>=2024.1
+requests>=2.32.0
+schedule>=1.2.2
+urllib3>=2.2.0
