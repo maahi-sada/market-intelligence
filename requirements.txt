@@ -5,3 +5,5 @@ pytz>=2024.1
 requests>=2.32.0
 schedule>=1.2.2
 urllib3>=2.2.0
+yfinance
+pandas
