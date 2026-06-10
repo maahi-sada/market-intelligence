@@ -8,6 +8,7 @@ import re
 import signal
 import threading
 import time
+from scanner.module1_ohlcv import OHLCVFetcher
 from dataclasses import dataclass
 from datetime import datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -1283,6 +1284,13 @@ def run_scheduler(stop_event: threading.Event) -> None:
     if ENABLE_MORNING_BRIEFING:
         schedule.every().day.at("08:30", "Asia/Kolkata").do(morning_briefing)
     schedule.every().day.at("09:00", "Asia/Kolkata").do(market_survival_protocol)
+    schedule.every().day.at("15:45").do(run_daily_scan)
+    def run_daily_scan():
+    logging.info("📊 Starting daily F&O OHLCV fetch...")
+    fetcher = OHLCVFetcher(lookback_days=60)
+    data = fetcher.fetch_all()
+    logging.info(f"✅ OHLCV fetch complete: {len(data)} stocks")
+    return data
 
     while not stop_event.is_set():
         schedule.run_pending()
