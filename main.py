@@ -1758,10 +1758,12 @@ def main() -> None:
         ]))
 
     threading.Thread(target=check_announcements, daemon=True).start()
-    if ENABLE_BSE_ANNOUNCEMENTS:
-        threading.Thread(target=check_bse_announcements, daemon=True).start()
-    if ENABLE_BROKER_NEWS:
-        threading.Thread(target=check_broker_news, daemon=True).start()
+if ENABLE_BSE_ANNOUNCEMENTS:
+    time.sleep(30)
+    threading.Thread(target=check_bse_announcements, daemon=True).start()
+if ENABLE_BROKER_NEWS:
+    time.sleep(30)
+    threading.Thread(target=check_broker_news, daemon=True).start()
 
     server = ThreadingHTTPServer(("0.0.0.0", CONFIG.port), WebhookHandler)
     logger.info("Server active on port %s", CONFIG.port)
