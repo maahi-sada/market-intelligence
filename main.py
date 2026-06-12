@@ -98,61 +98,70 @@ def number(value: Any, default: float = 0) -> float:
 
 
 # =============================================================================
-# PERSISTENT DEDUPE — npoint.io cloud storage (survives Railway redeploys)
+# PERSISTENT DEDUPE — GitHub Gist storage (survives Railway redeploys)
 # =============================================================================
 
-NPOINT_ANN_URL  = os.environ.get("NPOINT_ANN_BIN", "").strip()
-NPOINT_NEWS_URL = os.environ.get("NPOINT_NEWS_BIN", "").strip()
-NPOINT_HEADERS  = {"Content-Type": "application/json"}
+GIST_TOKEN    = os.environ.get("GIST_TOKEN", "").strip()
+GIST_ANN_ID   = os.environ.get("GIST_ANN_ID", "").strip()
+GIST_NEWS_ID  = os.environ.get("GIST_NEWS_ID", "").strip()
+GIST_BASE     = "https://api.github.com/gists"
 
 
 class SeenStore:
     """
-    Persistent seen-ID store backed by npoint.io.
-    Falls back to local file if npoint is unavailable.
+    Persistent seen-ID store backed by GitHub Gist.
+    Falls back to local file if Gist is unavailable.
     In-memory index for fast O(1) lookups during runtime.
-    Saves to npoint every 5 adds to reduce API calls.
+    Saves to Gist every 5 adds to reduce API calls.
     """
 
-    def __init__(self, path: Path, url: str, max_items: int = 1000) -> None:
-        self.path = path
-        self.url  = url
+    def __init__(self, path: Path, gist_id: str, filename: str, max_items: int = 1000) -> None:
+        self.path     = path
+        self.gist_id  = gist_id
+        self.filename = filename
         self.max_items = max_items
         self.items: list[str] = []
         self.index: set[str] = set()
         self.lock = threading.Lock()
         self._unsaved = 0
 
-    # ── npoint helpers ──
+    def _headers(self) -> dict:
+        return {
+            "Authorization": f"token {GIST_TOKEN}",
+            "Accept": "application/vnd.github+json",
+        }
 
-    def _np_get(self) -> list[str]:
-        if not self.url:
+    def _gist_get(self) -> list[str]:
+        if not self.gist_id or not GIST_TOKEN:
             return []
         try:
-            resp = requests.get(self.url, timeout=10)
+            resp = requests.get(
+                f"{GIST_BASE}/{self.gist_id}",
+                headers=self._headers(),
+                timeout=10,
+            )
             resp.raise_for_status()
-            return [str(i) for i in resp.json().get("ids", [])]
+            content = resp.json()["files"][self.filename]["content"]
+            return [str(i) for i in json.loads(content).get("ids", [])]
         except Exception as exc:
-            logger.warning("npoint GET failed: %s", exc)
+            logger.warning("Gist GET failed: %s", exc)
             return []
 
-    def _np_put(self, items: list[str]) -> bool:
-        if not self.url:
+    def _gist_put(self, items: list[str]) -> bool:
+        if not self.gist_id or not GIST_TOKEN:
             return False
         try:
-            resp = requests.post(
-                self.url,
-                headers=NPOINT_HEADERS,
-                json={"ids": items[-self.max_items:]},
+            resp = requests.patch(
+                f"{GIST_BASE}/{self.gist_id}",
+                headers=self._headers(),
+                json={"files": {self.filename: {"content": json.dumps({"ids": items[-self.max_items:]})}}},
                 timeout=10,
             )
             resp.raise_for_status()
             return True
         except Exception as exc:
-            logger.warning("npoint PUT failed: %s", exc)
+            logger.warning("Gist PUT failed: %s", exc)
             return False
-
-    # ── Local file fallback ──
 
     def _local_load(self) -> list[str]:
         try:
@@ -176,13 +185,11 @@ class SeenStore:
         except Exception as exc:
             logger.warning("Local save failed: %s", exc)
 
-    # ── Public API ──
-
     def load(self) -> None:
         with self.lock:
-            items = self._np_get()
+            items = self._gist_get()
             if items:
-                logger.info("✅ Loaded %s seen ids from npoint", len(items))
+                logger.info("✅ Loaded %s seen ids from Gist (%s)", len(items), self.gist_id[:8])
             else:
                 items = self._local_load()
                 logger.info("Loaded %s seen ids from local file %s", len(items), self.path.name)
@@ -212,13 +219,13 @@ class SeenStore:
             self._flush()
 
     def _flush(self) -> None:
-        self._np_put(self.items)
+        self._gist_put(self.items)
         self._local_save(self.items)
         self._unsaved = 0
 
 
-seen_ann  = SeenStore(SEEN_ANN_FILE,  NPOINT_ANN_URL)
-seen_news = SeenStore(SEEN_NEWS_FILE, NPOINT_NEWS_URL)
+seen_ann  = SeenStore(SEEN_ANN_FILE,  GIST_ANN_ID,  "seen_ann.json")
+seen_news = SeenStore(SEEN_NEWS_FILE, GIST_NEWS_ID, "seen_news.json")
 daily_alert_lock = threading.Lock()
 daily_alert_date = ""
 daily_alert_count = 0
