@@ -98,68 +98,58 @@ def number(value: Any, default: float = 0) -> float:
 
 
 # =============================================================================
-# PERSISTENT DEDUPE — JSONBin cloud storage (survives Railway redeploys)
+# PERSISTENT DEDUPE — npoint.io cloud storage (survives Railway redeploys)
 # =============================================================================
 
-JSONBIN_API_KEY  = os.environ.get("JSONBIN_API_KEY", "").strip()
-JSONBIN_ANN_BIN  = os.environ.get("JSONBIN_SEEN_ANN", "").strip()
-JSONBIN_NEWS_BIN = os.environ.get("JSONBIN_SEEN_NEWS", "").strip()
-JSONBIN_BASE     = "https://api.jsonbin.io/v3/b"
-JSONBIN_HEADERS  = {
-    "X-Master-Key": JSONBIN_API_KEY,
-    "Content-Type": "application/json",
-}
+NPOINT_ANN_URL  = os.environ.get("NPOINT_ANN_BIN", "").strip()
+NPOINT_NEWS_URL = os.environ.get("NPOINT_NEWS_BIN", "").strip()
+NPOINT_HEADERS  = {"Content-Type": "application/json"}
 
 
 class SeenStore:
     """
-    Persistent seen-ID store backed by JSONBin.
-    Falls back to local file if JSONBin is unavailable.
+    Persistent seen-ID store backed by npoint.io.
+    Falls back to local file if npoint is unavailable.
     In-memory index for fast O(1) lookups during runtime.
-    Saves to JSONBin every 10 adds to reduce API calls.
+    Saves to npoint every 5 adds to reduce API calls.
     """
 
-    def __init__(self, path: Path, bin_id: str, max_items: int = 1000) -> None:
+    def __init__(self, path: Path, url: str, max_items: int = 1000) -> None:
         self.path = path
-        self.bin_id = bin_id
+        self.url  = url
         self.max_items = max_items
         self.items: list[str] = []
         self.index: set[str] = set()
         self.lock = threading.Lock()
         self._unsaved = 0
 
-    # ── JSONBin helpers ──
+    # ── npoint helpers ──
 
-    def _jb_get(self) -> list[str]:
-        if not self.bin_id or not JSONBIN_API_KEY:
+    def _np_get(self) -> list[str]:
+        if not self.url:
             return []
         try:
-            resp = requests.get(
-                f"{JSONBIN_BASE}/{self.bin_id}/latest",
-                headers=JSONBIN_HEADERS,
-                timeout=10,
-            )
+            resp = requests.get(self.url, timeout=10)
             resp.raise_for_status()
-            data = resp.json().get("record", {})
-            return [str(i) for i in data.get("ids", [])]
+            return [str(i) for i in resp.json().get("ids", [])]
         except Exception as exc:
-            logger.warning("JSONBin GET failed (%s): %s", self.bin_id[:8], exc)
+            logger.warning("npoint GET failed: %s", exc)
             return []
 
-    def _jb_put(self, items: list[str]) -> bool:
-        if not self.bin_id or not JSONBIN_API_KEY:
+    def _np_put(self, items: list[str]) -> bool:
+        if not self.url:
             return False
         try:
-            resp = requests.put(
-                f"{JSONBIN_BASE}/{self.bin_id}",
-                headers=JSONBIN_HEADERS,
+            resp = requests.post(
+                self.url,
+                headers=NPOINT_HEADERS,
                 json={"ids": items[-self.max_items:]},
                 timeout=10,
             )
             resp.raise_for_status()
             return True
         except Exception as exc:
-            logger.warning("JSONBin PUT failed (%s): %s", self.bin_id[:8], exc)
+            logger.warning("npoint PUT failed: %s", exc)
             return False
 
     # ── Local file fallback ──
@@ -190,12 +180,10 @@ class SeenStore:
 
     def load(self) -> None:
         with self.lock:
-            # Try JSONBin first — survives redeploys
-            items = self._jb_get()
+            items = self._np_get()
             if items:
-                logger.info("✅ Loaded %s seen ids from JSONBin (%s)", len(items), self.bin_id[:8])
+                logger.info("✅ Loaded %s seen ids from npoint", len(items))
             else:
-                # Fall back to local file
                 items = self._local_load()
                 logger.info("Loaded %s seen ids from local file %s", len(items), self.path.name)
             self.items = items[-self.max_items:]
@@ -216,7 +204,6 @@ class SeenStore:
                 self.items = self.items[-self.max_items:]
                 self.index.difference_update(removed)
             self._unsaved += 1
-            # Save every 5 adds to reduce JSONBin API calls
             if self._unsaved >= 5:
                 self._flush()
 
@@ -225,14 +212,13 @@ class SeenStore:
             self._flush()
 
     def _flush(self) -> None:
-        """Internal: save to JSONBin + local file. Call inside lock."""
-        self._jb_put(self.items)
+        self._np_put(self.items)
         self._local_save(self.items)
         self._unsaved = 0
 
 
-seen_ann  = SeenStore(SEEN_ANN_FILE,  JSONBIN_ANN_BIN)
-seen_news = SeenStore(SEEN_NEWS_FILE, JSONBIN_NEWS_BIN)
+seen_ann  = SeenStore(SEEN_ANN_FILE,  NPOINT_ANN_URL)
+seen_news = SeenStore(SEEN_NEWS_FILE, NPOINT_NEWS_URL)
 daily_alert_lock = threading.Lock()
 daily_alert_date = ""
 daily_alert_count = 0
